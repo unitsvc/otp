@@ -18,9 +18,10 @@
 package hotp
 
 import (
+	"io"
+
 	"github.com/unitsvc/otp"
 	"github.com/unitsvc/otp/internal"
-	"io"
 
 	"crypto/hmac"
 	"crypto/rand"

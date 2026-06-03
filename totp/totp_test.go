@@ -18,9 +18,9 @@
 package totp
 
 import (
-	"github.com/unitsvc/otp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/unitsvc/otp"
 
 	"encoding/base32"
 	"testing"
@@ -61,14 +61,14 @@ var (
 	}
 )
 
-//
 // Test vectors from http://tools.ietf.org/html/rfc6238#appendix-B
 // NOTE -- the test vectors are documented as having the SAME
 // secret -- this is WRONG -- they have a variable secret
 // depending upon the hmac algorithm:
-// 		http://www.rfc-editor.org/errata_search.php?rfc=6238
-// this only took a few hours of head/desk interaction to figure out.
 //
+//	http://www.rfc-editor.org/errata_search.php?rfc=6238
+//
+// this only took a few hours of head/desk interaction to figure out.
 func TestValidateRFCMatrix(t *testing.T) {
 	for _, tx := range rfcMatrixTCs {
 		valid, err := ValidateCustom(tx.TOTP, tx.Secret, time.Unix(tx.TS, 0).UTC(),
