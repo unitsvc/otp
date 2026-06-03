@@ -1,3 +1,3 @@
 module github.com/unitsvc/otp/interop
 
-go 1.12
+go 1.26.3
