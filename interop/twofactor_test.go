@@ -22,9 +22,9 @@ import (
 	"time"
 
 	"github.com/gokyle/twofactor"
-	"github.com/pquerna/otp"
-	"github.com/pquerna/otp/totp"
 	"github.com/stretchr/testify/require"
+	"github.com/unitsvc/otp"
+	"github.com/unitsvc/otp/totp"
 )
 
 func TestTwoFactor(t *testing.T) {

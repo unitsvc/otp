@@ -18,7 +18,7 @@
 package totp
 
 import (
-	"github.com/pquerna/otp"
+	"github.com/unitsvc/otp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 

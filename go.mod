@@ -1,4 +1,4 @@
-module github.com/pquerna/otp
+module github.com/unitsvc/otp
 
 go 1.12
 

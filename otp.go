@@ -203,7 +203,7 @@ type Algorithm int
 const (
 	// AlgorithmSHA1 should be used for compatibility with Google Authenticator.
 	//
-	// See https://github.com/pquerna/otp/issues/55 for additional details.
+	// See https://github.com/unitsvc/otp/issues/55 for additional details.
 	AlgorithmSHA1 Algorithm = iota
 	AlgorithmSHA256
 	AlgorithmSHA512
