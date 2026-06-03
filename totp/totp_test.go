@@ -23,6 +23,7 @@ import (
 	"github.com/unitsvc/otp"
 
 	"encoding/base32"
+	"io"
 	"testing"
 	"time"
 )
@@ -197,4 +198,566 @@ func TestSteamSecret(t *testing.T) {
 	valid, err := ValidateCustom(code, w.Secret(), n, opts)
 	require.NoError(t, err)
 	require.True(t, valid)
+}
+
+func TestGenerateWithImageURL(t *testing.T) {
+	k, err := Generate(GenerateOpts{
+		Issuer:      "SnakeOil",
+		AccountName: "alice@example.com",
+		ImageURL:    "https://example.com/logo.png",
+	})
+	require.NoError(t, err)
+	require.Contains(t, k.String(), "image=")
+	require.Equal(t, "https://example.com/logo.png", k.ImageURL())
+}
+
+func TestGenerateWithoutImageURL(t *testing.T) {
+	k, err := Generate(GenerateOpts{
+		Issuer:      "SnakeOil",
+		AccountName: "alice@example.com",
+	})
+	require.NoError(t, err)
+	require.NotContains(t, k.String(), "image=")
+}
+
+func TestValidateStep(t *testing.T) {
+	secSha1 := base32.StdEncoding.EncodeToString([]byte("12345678901234567890"))
+	n := time.Now().UTC()
+
+	code, err := GenerateCodeCustom(secSha1, n, ValidateOpts{
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+	require.NoError(t, err)
+
+	valid, step, err := ValidateCustomStep(code, secSha1, n, ValidateOpts{
+		Period:    30,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+	require.NoError(t, err)
+	require.True(t, valid)
+	require.Equal(t, uint64(n.Unix())/30, step)
+}
+
+func TestValidateStepInvalid(t *testing.T) {
+	secSha1 := base32.StdEncoding.EncodeToString([]byte("12345678901234567890"))
+	n := time.Now().UTC()
+
+	valid, step, err := ValidateCustomStep("000000", secSha1, n, ValidateOpts{
+		Period:    30,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+	require.NoError(t, err)
+	require.False(t, valid)
+	require.Equal(t, uint64(0), step)
+}
+
+func TestValidateCustomStepUnderflow(t *testing.T) {
+	secSha1 := base32.StdEncoding.EncodeToString([]byte("12345678901234567890"))
+
+	// Test at unix epoch boundary (counter = 0) with Skew > 0
+	// Should not panic or produce incorrect results
+	valid, _, err := ValidateCustomStep("000000", secSha1, time.Unix(0, 0).UTC(), ValidateOpts{
+		Period:    30,
+		Skew:      1,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+	require.NoError(t, err)
+	require.False(t, valid)
+}
+
+func TestValidateStepSimple(t *testing.T) {
+	secSha1 := base32.StdEncoding.EncodeToString([]byte("12345678901234567890"))
+	code, err := GenerateCode(secSha1, time.Now().UTC())
+	require.NoError(t, err)
+	require.NotEmpty(t, code)
+
+	valid, step := ValidateStep(code, secSha1)
+	require.True(t, valid)
+	require.Greater(t, step, uint64(0))
+}
+
+func TestGenerateWithCustomRand(t *testing.T) {
+	// Test with a custom Rand reader
+	k, err := Generate(GenerateOpts{
+		Issuer:      "TestOrg",
+		AccountName: "user@example.com",
+		Rand:        customReader{},
+	})
+	require.NoError(t, err)
+	require.Equal(t, "TestOrg", k.Issuer())
+}
+
+func TestGenerateWithCustomRandError(t *testing.T) {
+	// Test that error from Rand reader is propagated
+	_, err := Generate(GenerateOpts{
+		Issuer:      "TestOrg",
+		AccountName: "user@example.com",
+		Rand:        errorReader{},
+	})
+	require.Error(t, err)
+}
+
+func TestGenerateDefaultPeriod(t *testing.T) {
+	k, err := Generate(GenerateOpts{
+		Issuer:      "TestOrg",
+		AccountName: "user@example.com",
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint64(30), k.Period())
+}
+
+func TestGenerateCustomPeriod(t *testing.T) {
+	k, err := Generate(GenerateOpts{
+		Issuer:      "TestOrg",
+		AccountName: "user@example.com",
+		Period:      60,
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint64(60), k.Period())
+}
+
+func TestGenerateMissingIssuer(t *testing.T) {
+	_, err := Generate(GenerateOpts{
+		AccountName: "user@example.com",
+	})
+	require.Equal(t, otp.ErrGenerateMissingIssuer, err)
+}
+
+func TestGenerateMissingAccountName(t *testing.T) {
+	_, err := Generate(GenerateOpts{
+		Issuer: "TestOrg",
+	})
+	require.Equal(t, otp.ErrGenerateMissingAccountName, err)
+}
+
+func TestGenerateWithCustomRandSecret(t *testing.T) {
+	// Test with a custom secret provided
+	k, err := Generate(GenerateOpts{
+		Issuer:      "TestOrg",
+		AccountName: "user@example.com",
+		Secret:      []byte("mysecret"),
+	})
+	require.NoError(t, err)
+	sec, err := b32NoPadding.DecodeString(k.Secret())
+	require.NoError(t, err)
+	require.Equal(t, []byte("mysecret"), sec)
+}
+
+func TestValidateCustomStepSkewZero(t *testing.T) {
+	sec := base32.StdEncoding.EncodeToString([]byte("12345678901234567890"))
+	// Generate code at ts=59 (counter=1)
+	code, err := GenerateCodeCustom(sec, time.Unix(59, 0).UTC(), ValidateOpts{
+		Digits:    otp.DigitsEight,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+	require.NoError(t, err)
+
+	// At Skew=0, code should validate at exact time
+	valid, step, err := ValidateCustomStep(code, sec, time.Unix(59, 0).UTC(), ValidateOpts{
+		Period:    30,
+		Skew:      0,
+		Digits:    otp.DigitsEight,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+	require.NoError(t, err)
+	require.True(t, valid)
+	require.Equal(t, uint64(1), step)
+
+	// At Skew=0, code should NOT validate at adjacent period (ts=90, counter=3)
+	valid, _, err = ValidateCustomStep(code, sec, time.Unix(90, 0).UTC(), ValidateOpts{
+		Period:    30,
+		Skew:      0,
+		Digits:    otp.DigitsEight,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+	require.NoError(t, err)
+	require.False(t, valid)
+}
+
+// Custom reader that returns zero bytes
+type customReader struct{}
+
+func (customReader) Read(p []byte) (int, error) {
+	for i := range p {
+		p[i] = byte(i)
+	}
+	return len(p), nil
+}
+
+// Error reader that always fails
+type errorReader struct{}
+
+func (errorReader) Read(p []byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
+}
+
+// ===== Counter and Remaining Tests =====
+
+func TestCounter(t *testing.T) {
+	// Test at timestamp=1451606400 (2016-01-01 00:00:00 UTC)
+	ts := time.Unix(1451606400, 0).UTC()
+
+	// With period=30, counter = 1451606400 / 30 = 48386880
+	counter := Counter(30, ts)
+	require.Equal(t, uint64(48386880), counter)
+
+	// With period=60, counter = 1451606400 / 60 = 24193440
+	counter = Counter(60, ts)
+	require.Equal(t, uint64(24193440), counter)
+}
+
+func TestCounterDefault(t *testing.T) {
+	ts := time.Now().UTC()
+	counter := Counter(0, ts) // Should use default period=30
+	require.Equal(t, uint64(ts.Unix())/30, counter)
+}
+
+func TestRemaining(t *testing.T) {
+	// Test at timestamp=1451606415 (15 seconds into period)
+	ts := time.Unix(1451606415, 0).UTC()
+	rem := Remaining(30, ts)
+	require.Equal(t, uint64(15000), rem) // 15 seconds = 15000 ms remaining
+
+	// Test at timestamp=1451606429 (29 seconds into period)
+	ts2 := time.Unix(1451606429, 0).UTC()
+	rem = Remaining(30, ts2)
+	require.Equal(t, uint64(1000), rem) // 1 second remaining
+
+	// Test at timestamp=1451606430 (exact boundary, start of new period)
+	// At exactly period boundary, remaining should be full period (30000ms)
+	ts3 := time.Unix(1451606430, 0).UTC()
+	rem = Remaining(30, ts3)
+	require.Equal(t, uint64(30000), rem) // At boundary, full period remaining
+}
+
+func TestRemainingDefault(t *testing.T) {
+	ts := time.Now().UTC()
+	rem := RemainingDefault(ts)
+	// Should be <= 30000 (max for 30 second period)
+	require.LessOrEqual(t, rem, uint64(30000))
+	require.Greater(t, rem, uint64(0))
+}
+
+func TestRemainingCustomPeriod(t *testing.T) {
+	// Test with 60-second period
+	ts := time.Unix(1451606415, 0).UTC() // 15 seconds into minute
+	rem := Remaining(60, ts)
+	require.Equal(t, uint64(45000), rem) // 45 seconds remaining
+}
+
+func TestCounterBoundary(t *testing.T) {
+	// Test at exact period boundaries
+	period := uint(30)
+
+	// At 0 seconds (epoch), counter=0
+	ts0 := time.Unix(0, 0).UTC()
+	require.Equal(t, uint64(0), Counter(period, ts0))
+
+	// At 29 seconds, counter=0 (still in first period)
+	ts29 := time.Unix(29, 0).UTC()
+	require.Equal(t, uint64(0), Counter(period, ts29))
+
+	// At 30 seconds, counter=1 (second period)
+	ts30 := time.Unix(30, 0).UTC()
+	require.Equal(t, uint64(1), Counter(period, ts30))
+
+	// At 59 seconds, counter=1 (still in second period)
+	ts59 := time.Unix(59, 0).UTC()
+	require.Equal(t, uint64(1), Counter(period, ts59))
+
+	// At 60 seconds, counter=2
+	ts60 := time.Unix(60, 0).UTC()
+	require.Equal(t, uint64(2), Counter(period, ts60))
+}
+
+// ===== TOTP Secure Functions Tests =====
+
+func TestValidateSecure(t *testing.T) {
+	// SHA256 secret (32 bytes for SHA256)
+	secSha256 := base32.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012"))
+	n := time.Now().UTC()
+
+	// Generate code using SHA256
+	code, err := GenerateCodeSecure(secSha256, n)
+	require.NoError(t, err)
+	require.Len(t, code, 6)
+
+	// Validate using SHA256
+	valid := ValidateSecure(code, secSha256)
+	require.True(t, valid)
+
+	// Validate using default (SHA1) should fail
+	valid = Validate(code, secSha256)
+	require.False(t, valid)
+}
+
+func TestGenerateCodeSecure(t *testing.T) {
+	secSha256 := base32.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012"))
+	n := time.Now().UTC()
+
+	code, err := GenerateCodeSecure(secSha256, n)
+	require.NoError(t, err)
+	require.Len(t, code, 6)
+
+	// Verify it's using SHA256 by comparing with GenerateCodeCustom
+	codeCustom, err := GenerateCodeCustom(secSha256, n, ValidateOpts{
+		Period:    30,
+		Skew:      1,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA256,
+	})
+	require.NoError(t, err)
+	require.Equal(t, code, codeCustom)
+}
+
+// ===== SkewPolicy Tests =====
+
+func TestValidateCustomSkewPolicy(t *testing.T) {
+	sec := base32.StdEncoding.EncodeToString([]byte("12345678901234567890"))
+
+	// Generate code at timestamp 59 (counter=1)
+	ts := time.Unix(59, 0).UTC()
+	code, err := GenerateCode(sec, ts)
+	require.NoError(t, err)
+	require.Len(t, code, 6)
+
+	// Test 1: Past-only tolerance (RFC recommended)
+	// At ts=59 (counter=1), code should validate with Past=1
+	valid, step, delta, err := ValidateCustomSkewPolicy(code, sec, ts, ValidateOptsWithSkewPolicy{
+		Period:     30,
+		SkewPolicy: SkewPolicy{Past: 1, Future: 0},
+		Digits:     otp.DigitsSix,
+		Algorithm:  otp.AlgorithmSHA1,
+	})
+	require.NoError(t, err)
+	require.True(t, valid)
+	require.Equal(t, uint64(1), step)
+	require.Equal(t, 0, delta) // Exact match
+
+	// Test 2: Future code should be rejected with Future=0
+	futureTs := time.Unix(90, 0).UTC() // counter=3
+	futureCode, err := GenerateCode(sec, futureTs)
+	require.NoError(t, err)
+
+	valid, _, _, err = ValidateCustomSkewPolicy(futureCode, sec, ts, ValidateOptsWithSkewPolicy{
+		Period:     30,
+		SkewPolicy: SkewPolicy{Past: 1, Future: 0},
+		Digits:     otp.DigitsSix,
+		Algorithm:  otp.AlgorithmSHA1,
+	})
+	require.NoError(t, err)
+	require.False(t, valid) // Future code rejected
+
+	// Test 3: Past code should be accepted with Past=1
+	pastTs := time.Unix(30, 0).UTC()    // counter=1, but we validate at counter=2
+	currentTs := time.Unix(60, 0).UTC() // counter=2
+	pastCode, err := GenerateCode(sec, pastTs)
+	require.NoError(t, err)
+
+	valid, step, delta, err = ValidateCustomSkewPolicy(pastCode, sec, currentTs, ValidateOptsWithSkewPolicy{
+		Period:     30,
+		SkewPolicy: SkewPolicy{Past: 1, Future: 0},
+		Digits:     otp.DigitsSix,
+		Algorithm:  otp.AlgorithmSHA1,
+	})
+	require.NoError(t, err)
+	require.True(t, valid)
+	require.Equal(t, uint64(1), step) // Matched at counter=1
+	require.Equal(t, -1, delta)       // Past by 1
+
+	// Test 4: Symmetric tolerance (equivalent to Skew: 1)
+	valid, _, _, err = ValidateCustomSkewPolicy(code, sec, ts, ValidateOptsWithSkewPolicy{
+		Period:     30,
+		SkewPolicy: SkewPolicy{Past: 1, Future: 1},
+		Digits:     otp.DigitsSix,
+		Algorithm:  otp.AlgorithmSHA1,
+	})
+	require.NoError(t, err)
+	require.True(t, valid)
+}
+
+func TestValidateRFCCompliant(t *testing.T) {
+	sec := base32.StdEncoding.EncodeToString([]byte("12345678901234567890"))
+
+	ts := time.Unix(59, 0).UTC()
+	code, err := GenerateCode(sec, ts)
+	require.NoError(t, err)
+
+	// RFC compliant should accept past codes
+	valid, step, err := ValidateRFCCompliant(code, sec, ts)
+	require.NoError(t, err)
+	require.True(t, valid)
+	require.Equal(t, uint64(1), step)
+
+	// RFC compliant should reject future codes
+	futureTs := time.Unix(90, 0).UTC()
+	futureCode, err := GenerateCode(sec, futureTs)
+	require.NoError(t, err)
+
+	valid, _, err = ValidateRFCCompliant(futureCode, sec, ts)
+	require.NoError(t, err)
+	require.False(t, valid)
+}
+
+// ===== Coverage Improvement Tests =====
+
+func TestGenerateCodeCustomAllOptions(t *testing.T) {
+	sec := base32.StdEncoding.EncodeToString([]byte("12345678901234567890"))
+	ts := time.Now().UTC()
+
+	// Test default encoder
+	codeDefault, err := GenerateCodeCustom(sec, ts, ValidateOpts{
+		Period:  30,
+		Digits:  otp.DigitsSix,
+		Encoder: otp.EncoderDefault,
+	})
+	require.NoError(t, err)
+	require.Len(t, codeDefault, 6)
+
+	// Test Steam encoder
+	secSteam := base32.StdEncoding.EncodeToString([]byte("12345678901234567890"))
+	codeSteam, err := GenerateCodeCustom(secSteam, ts, ValidateOpts{
+		Period:  30,
+		Digits:  otp.Digits(5),
+		Encoder: otp.EncoderSteam,
+	})
+	require.NoError(t, err)
+	require.Len(t, codeSteam, 5)
+
+	// Test custom period
+	codeCustomPeriod, err := GenerateCodeCustom(sec, ts, ValidateOpts{
+		Period: 60,
+		Digits: otp.DigitsSix,
+	})
+	require.NoError(t, err)
+	require.Len(t, codeCustomPeriod, 6)
+
+	// Test 8 digits
+	codeEight, err := GenerateCodeCustom(sec, ts, ValidateOpts{
+		Period: 30,
+		Digits: otp.DigitsEight,
+	})
+	require.NoError(t, err)
+	require.Len(t, codeEight, 8)
+
+	// Test SHA256
+	secSha256 := base32.StdEncoding.EncodeToString([]byte("12345678901234567890123456789012"))
+	codeSha256, err := GenerateCodeCustom(secSha256, ts, ValidateOpts{
+		Period:    30,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA256,
+	})
+	require.NoError(t, err)
+	require.Len(t, codeSha256, 6)
+}
+
+func TestRemainingAllCases(t *testing.T) {
+	// Test at various timestamps
+	testCases := []struct {
+		period   uint
+		ts       time.Time
+		expected uint64
+	}{
+		{30, time.Unix(15, 0).UTC(), 15000}, // 15 seconds into period
+		{30, time.Unix(29, 0).UTC(), 1000},  // 29 seconds into period
+		{30, time.Unix(0, 0).UTC(), 30000},  // At epoch
+		{60, time.Unix(30, 0).UTC(), 30000}, // 30 seconds into 60s period
+		{15, time.Unix(10, 0).UTC(), 5000},  // 10 seconds into 15s period
+	}
+
+	for _, tc := range testCases {
+		remaining := Remaining(tc.period, tc.ts)
+		require.Equal(t, tc.expected, remaining, "Period=%d, Ts=%d", tc.period, tc.ts.Unix())
+	}
+}
+
+func TestValidateCustomSkewPolicyAllCases(t *testing.T) {
+	sec := base32.StdEncoding.EncodeToString([]byte("12345678901234567890"))
+
+	// Test case 1: Exact match (delta=0)
+	ts := time.Unix(59, 0).UTC() // counter=1
+	code, err := GenerateCode(sec, ts)
+	require.NoError(t, err)
+
+	valid, step, delta, err := ValidateCustomSkewPolicy(code, sec, ts, ValidateOptsWithSkewPolicy{
+		Period:     30,
+		SkewPolicy: SkewPolicy{Past: 1, Future: 1},
+		Digits:     otp.DigitsSix,
+	})
+	require.NoError(t, err)
+	require.True(t, valid)
+	require.Equal(t, uint64(1), step)
+	require.Equal(t, 0, delta)
+
+	// Test case 2: Past match (delta=-1)
+	currentTs := time.Unix(90, 0).UTC() // counter=3
+	pastTs := time.Unix(59, 0).UTC()    // counter=1
+	pastCode, err := GenerateCode(sec, pastTs)
+	require.NoError(t, err)
+
+	valid, step, delta, err = ValidateCustomSkewPolicy(pastCode, sec, currentTs, ValidateOptsWithSkewPolicy{
+		Period:     30,
+		SkewPolicy: SkewPolicy{Past: 2, Future: 0},
+		Digits:     otp.DigitsSix,
+	})
+	require.NoError(t, err)
+	require.True(t, valid)
+	require.Equal(t, uint64(1), step)
+	require.Equal(t, -2, delta) // 2 periods in the past
+
+	// Test case 3: Future match (delta=+1)
+	currentTs2 := time.Unix(30, 0).UTC() // counter=1
+	futureTs := time.Unix(60, 0).UTC()   // counter=2
+	futureCode, err := GenerateCode(sec, futureTs)
+	require.NoError(t, err)
+
+	valid, step, delta, err = ValidateCustomSkewPolicy(futureCode, sec, currentTs2, ValidateOptsWithSkewPolicy{
+		Period:     30,
+		SkewPolicy: SkewPolicy{Past: 0, Future: 1},
+		Digits:     otp.DigitsSix,
+	})
+	require.NoError(t, err)
+	require.True(t, valid)
+	require.Equal(t, uint64(2), step)
+	require.Equal(t, 1, delta) // 1 period in the future
+
+	// Test case 4: No match - outside skew range
+	veryPastTs := time.Unix(0, 0).UTC() // counter=0
+	veryPastCode, err := GenerateCode(sec, veryPastTs)
+	require.NoError(t, err)
+
+	valid, _, _, err = ValidateCustomSkewPolicy(veryPastCode, sec, time.Unix(90, 0).UTC(), ValidateOptsWithSkewPolicy{
+		Period:     30,
+		SkewPolicy: SkewPolicy{Past: 1, Future: 0}, // Only 1 period past tolerance
+		Digits:     otp.DigitsSix,
+	})
+	require.NoError(t, err)
+	require.False(t, valid) // counter=0 is 3 periods away from counter=3
+
+	// Test case 5: Past=0, Future=0 (exact match only)
+	codeExact, err := GenerateCode(sec, time.Unix(30, 0).UTC())
+	require.NoError(t, err)
+
+	valid, step, delta, err = ValidateCustomSkewPolicy(codeExact, sec, time.Unix(30, 0).UTC(), ValidateOptsWithSkewPolicy{
+		Period:     30,
+		SkewPolicy: SkewPolicy{Past: 0, Future: 0},
+		Digits:     otp.DigitsSix,
+	})
+	require.NoError(t, err)
+	require.True(t, valid)
+	require.Equal(t, uint64(1), step)
+	require.Equal(t, 0, delta)
+
+	// Same code at adjacent time should fail
+	valid, _, _, err = ValidateCustomSkewPolicy(codeExact, sec, time.Unix(60, 0).UTC(), ValidateOptsWithSkewPolicy{
+		Period:     30,
+		SkewPolicy: SkewPolicy{Past: 0, Future: 0},
+		Digits:     otp.DigitsSix,
+	})
+	require.NoError(t, err)
+	require.False(t, valid)
 }
