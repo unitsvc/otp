@@ -24,6 +24,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"sync"
 )
 
 // Security validation errors
@@ -33,8 +34,15 @@ var ErrSecretTooLong = errors.New("secret too long, must be at most 64 bytes")
 var b32NoPadding = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 // Secret represents an OTP secret key with multiple encoding representations.
+// Encoding results are lazily computed and cached for performance.
+// Secret is safe for concurrent use. Clear() synchronizes with concurrent reads.
 type Secret struct {
-	bytes []byte
+	mu          sync.RWMutex
+	bytes       []byte
+	base32Once  sync.Once
+	base32Cache string
+	hexOnce     sync.Once
+	hexCache    string
 }
 
 // New creates a new random secret of given size in bytes.
@@ -118,6 +126,8 @@ func FromHex(str string) (*Secret, error) {
 // Bytes returns a copy of the raw bytes of the secret.
 // Returns a copy to prevent accidental modification of the internal secret.
 func (s *Secret) Bytes() []byte {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	if s.bytes == nil {
 		return nil
 	}
@@ -128,32 +138,69 @@ func (s *Secret) Bytes() []byte {
 
 // Clear zeros out the secret bytes to minimize memory exposure.
 // After calling Clear, the secret should no longer be used.
+// Subsequent calls to Base32() or Hex() will return empty strings.
+// Clear is safe to call concurrently with read methods.
 func (s *Secret) Clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.bytes != nil {
 		for i := range s.bytes {
 			s.bytes[i] = 0
 		}
 		s.bytes = nil
 	}
+	// Clear cached encodings and reset sync.Once for future use after Clear
+	s.base32Cache = ""
+	s.hexCache = ""
+	s.base32Once = sync.Once{}
+	s.hexOnce = sync.Once{}
 }
 
 // Base32 returns the Base32 encoded string without padding.
 // This is the format used in otpauth:// URIs.
+// The result is computed on first access and cached.
+// Returns empty string after Clear() has been called.
 func (s *Secret) Base32() string {
-	return b32NoPadding.EncodeToString(s.bytes)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.bytes == nil {
+		return ""
+	}
+	s.base32Once.Do(func() {
+		s.base32Cache = b32NoPadding.EncodeToString(s.bytes)
+	})
+	return s.base32Cache
 }
 
 // Base32WithPadding returns the Base32 encoded string with standard padding.
+// Returns empty string after Clear() has been called.
 func (s *Secret) Base32WithPadding() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.bytes == nil {
+		return ""
+	}
 	return base32.StdEncoding.EncodeToString(s.bytes)
 }
 
 // Hex returns the hexadecimal encoded string.
+// The result is computed on first access and cached.
+// Returns empty string after Clear() has been called.
 func (s *Secret) Hex() string {
-	return hex.EncodeToString(s.bytes)
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.bytes == nil {
+		return ""
+	}
+	s.hexOnce.Do(func() {
+		s.hexCache = hex.EncodeToString(s.bytes)
+	})
+	return s.hexCache
 }
 
 // Len returns the length of the secret in bytes.
 func (s *Secret) Len() int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return len(s.bytes)
 }

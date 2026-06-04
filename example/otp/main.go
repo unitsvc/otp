@@ -134,4 +134,34 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Printf("  QR code: %dx%d pixels\n", img.Bounds().Dx(), img.Bounds().Dy())
+	fmt.Println()
+
+	// --- 8. HashChecked (safe hash accessor) ---
+	fmt.Println("--- 8. HashChecked (safe hash accessor) ---")
+	for _, alg := range []otp.Algorithm{otp.AlgorithmSHA256, otp.Algorithm(999)} {
+		h, err := alg.HashChecked()
+		if err != nil {
+			fmt.Printf("  %s: ERROR %v\n", alg.String(), err)
+		} else {
+			fmt.Printf("  %s: hash size=%d bytes\n", alg.String(), h.Size())
+		}
+	}
+	fmt.Println()
+
+	// --- 9. GetExtraParam (reading custom URI parameters) ---
+	fmt.Println("--- 9. GetExtraParam (custom URI parameters) ---")
+	uriWithExtra := "otpauth://totp/Example:alice@example.com?secret=JBSWY3DPEHPK3PXP&issuer=Example&source=web&lock=true"
+	keyExtra, err := otp.NewKeyFromURL(uriWithExtra)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("  source: %q\n", keyExtra.GetExtraParam("source"))
+	fmt.Printf("  lock:   %q\n", keyExtra.GetExtraParam("lock"))
+	fmt.Printf("  missing:%q\n", keyExtra.GetExtraParam("nonexistent"))
+	fmt.Println()
+
+	// --- 10. ValidationResult ---
+	fmt.Println("--- 10. ValidationResult struct ---")
+	vr := otp.ValidationResult{Valid: true, Delta: -1, Step: 12345}
+	fmt.Printf("  Valid=%v, Delta=%d (past match), Step=%d\n", vr.Valid, vr.Delta, vr.Step)
 }

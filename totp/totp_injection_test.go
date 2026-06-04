@@ -580,13 +580,13 @@ func TestTOTPGenerateOptionsInjection(t *testing.T) {
 			name:        "issuer with newline",
 			issuer:      "Example\nEvil",
 			accountName: "alice@example.com",
-			wantErr:     nil, // Newline allowed (URL encoded)
+			wantErr:     otp.ErrInvalidURIChars, // Control chars rejected
 		},
 		{
 			name:        "account name with null",
 			issuer:      "Example",
 			accountName: "alice\x00@example.com",
-			wantErr:     nil, // Null allowed (URL encoded)
+			wantErr:     otp.ErrInvalidURIChars, // Control chars rejected
 		},
 		{
 			name:        "issuer with unicode",
@@ -598,13 +598,13 @@ func TestTOTPGenerateOptionsInjection(t *testing.T) {
 			name:        "very long issuer",
 			issuer:      "A" + string(make([]byte, 1000)),
 			accountName: "alice@example.com",
-			wantErr:     nil, // No length limit
+			wantErr:     otp.ErrURITooLong, // URI length limit enforced
 		},
 		{
 			name:        "very long account name",
 			issuer:      "Example",
 			accountName: "alice@" + string(make([]byte, 1000)) + ".com",
-			wantErr:     nil, // No length limit
+			wantErr:     otp.ErrURITooLong, // URI length limit enforced
 		},
 		{
 			name:        "image URL with javascript",

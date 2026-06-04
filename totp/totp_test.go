@@ -24,6 +24,7 @@ import (
 
 	"encoding/base32"
 	"io"
+	"math"
 	"testing"
 	"time"
 )
@@ -760,4 +761,265 @@ func TestValidateCustomSkewPolicyAllCases(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.False(t, valid)
+}
+
+// ===== ValidateCustomResult tests =====
+
+func TestValidateCustomResult(t *testing.T) {
+	sec := "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	now := time.Unix(60, 0).UTC() // counter = 2
+
+	code, err := GenerateCode(sec, now)
+	require.NoError(t, err)
+
+	// Exact match: Delta should be 0
+	result, err := ValidateCustomResult(code, sec, now, ValidateOpts{
+		Period:    30,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	require.True(t, result.Valid)
+	require.Equal(t, uint64(2), result.Step)
+	require.Equal(t, 0, result.Delta)
+
+	// Past match: Delta should be negative
+	pastCode, err := GenerateCode(sec, time.Unix(30, 0).UTC())
+	require.NoError(t, err)
+	result2, err := ValidateCustomResult(pastCode, sec, now, ValidateOpts{
+		Period:    30,
+		Skew:      1,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+	require.NoError(t, err)
+	require.True(t, result2.Valid)
+	require.Equal(t, int(-1), result2.Delta)
+
+	// Invalid code
+	result3, err := ValidateCustomResult("000000", sec, now, ValidateOpts{
+		Period:    30,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+	require.NoError(t, err)
+	require.False(t, result3.Valid)
+
+	// Error path: bad secret causes error
+	result4, err := ValidateCustomResult("000000", "SHORT", now, ValidateOpts{
+		Period:    30,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+	require.Error(t, err)
+	require.Nil(t, result4)
+}
+
+// ===== CounterWithT0 edge cases =====
+
+func TestCounterWithT0Overflow(t *testing.T) {
+	now := time.Unix(1704067200, 0).UTC()
+
+	// Normal negative T0: counter should be larger than Counter()
+	normal := Counter(30, now)
+	withNegT0 := CounterWithT0(30, -1000, now)
+	require.Greater(t, withNegT0, normal, "negative T0 should produce larger counter")
+
+	// Extreme negative T0 (MinInt64): should not panic, should clamp
+	withMinT0 := CounterWithT0(30, math.MinInt64, now)
+	require.Greater(t, withMinT0, uint64(0), "MinInt64 T0 should not produce 0 counter")
+
+	// Future T0 (positive, larger than timestamp): ts < 0 => counter = 0
+	withFutureT0 := CounterWithT0(30, math.MaxInt64, now)
+	require.Equal(t, uint64(0), withFutureT0, "future T0 should produce counter 0")
+
+	// Period 0 defaults to 30
+	withPeriod0 := CounterWithT0(0, 0, now)
+	require.Equal(t, Counter(30, now), withPeriod0)
+}
+
+// ===== RemainingWithT0 edge cases =====
+
+func TestRemainingWithT0NegativeElapsed(t *testing.T) {
+	now := time.Unix(1704067200, 0).UTC()
+
+	// T0 far in the future: t0*1000 overflows, but elapsedMs < 0 => clamped to 0 => remaining = full period
+	// Use a large but non-overflowing T0 to test the negative elapsed path
+	remaining := RemainingWithT0(30, now.Unix()+100, now)
+	require.Equal(t, uint64(30000), remaining, "future T0 should give full period remaining")
+
+	// Normal T0=0: should equal Remaining()
+	require.Equal(t, Remaining(30, now), RemainingWithT0(30, 0, now))
+
+	// Period 0 defaults to 30
+	require.Equal(t, Remaining(30, now), RemainingWithT0(0, 0, now))
+}
+
+// ===== ValidateCustomResult error paths =====
+
+func TestValidateCustomResultErrorPath(t *testing.T) {
+	// Bad secret (too short) triggers error from GenerateCodeCustom inside ValidateCustomStep
+	result, err := ValidateCustomResult("000000", "SHORT", time.Now().UTC(), ValidateOpts{
+		Period:    30,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+	require.Error(t, err)
+	require.Nil(t, result)
+}
+
+// ===== ValidateCustomSkewPolicy error paths =====
+
+func TestValidateCustomSkewPolicyWindowTooLarge(t *testing.T) {
+	sec := "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	now := time.Now().UTC()
+	_, _, _, err := ValidateCustomSkewPolicy("000000", sec, now, ValidateOptsWithSkewPolicy{
+		Period:     30,
+		SkewPolicy: SkewPolicy{Past: 11},
+		Digits:     otp.DigitsSix,
+	})
+	require.Error(t, err)
+	require.Equal(t, otp.ErrWindowTooLarge, err)
+}
+
+func TestValidateCustomSkewPolicyFutureTooLarge(t *testing.T) {
+	sec := "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	now := time.Now().UTC()
+	_, _, _, err := ValidateCustomSkewPolicy("000000", sec, now, ValidateOptsWithSkewPolicy{
+		Period:     30,
+		SkewPolicy: SkewPolicy{Future: 11},
+		Digits:     otp.DigitsSix,
+	})
+	require.Error(t, err)
+	require.Equal(t, otp.ErrWindowTooLarge, err)
+}
+
+func TestValidateCustomSkewPolicyInvalidSecret(t *testing.T) {
+	now := time.Now().UTC()
+	_, _, _, err := ValidateCustomSkewPolicy("000000", "SHORT", now, ValidateOptsWithSkewPolicy{
+		Period:     30,
+		SkewPolicy: SkewPolicy{Past: 1},
+		Digits:     otp.DigitsSix,
+	})
+	require.Error(t, err)
+}
+
+func TestValidateCustomSkewPolicyErrorInPastCheck(t *testing.T) {
+	now := time.Now().UTC()
+	// Invalid secret triggers error in past step check
+	_, _, _, err := ValidateCustomSkewPolicy("000000", "SHORT", now, ValidateOptsWithSkewPolicy{
+		Period:     30,
+		SkewPolicy: SkewPolicy{Past: 1, Future: 0},
+		Digits:     otp.DigitsSix,
+	})
+	require.Error(t, err)
+}
+
+func TestValidateCustomSkewPolicyErrorInFutureCheck(t *testing.T) {
+	sec := "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	now := time.Now().UTC()
+	// Generate code and use SkewPolicy with Future=1, no match => exercises future check loop
+	code, _ := GenerateCode(sec, now)
+	valid, _, _, err := ValidateCustomSkewPolicy(code, sec, now, ValidateOptsWithSkewPolicy{
+		Period:     30,
+		SkewPolicy: SkewPolicy{Past: 0, Future: 1},
+		Digits:     otp.DigitsSix,
+	})
+	require.NoError(t, err)
+	require.True(t, valid)
+}
+
+func TestValidateCustomResultWithSkew(t *testing.T) {
+	sec := "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	ts := time.Unix(60, 0).UTC()
+	pastCode, _ := GenerateCode(sec, time.Unix(30, 0).UTC())
+
+	result, err := ValidateCustomResult(pastCode, sec, ts, ValidateOpts{
+		Period:    30,
+		Skew:      1,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+		T0:        0,
+	})
+	require.NoError(t, err)
+	require.True(t, result.Valid)
+	require.Equal(t, int(-1), result.Delta)
+	require.Equal(t, uint64(1), result.Step)
+}
+
+func TestValidateCustomResultWithT0(t *testing.T) {
+	sec := "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	t0 := int64(100)
+	ts := time.Unix(60, 0).UTC()
+
+	code, err := GenerateCodeCustom(sec, ts, ValidateOpts{
+		Period:    30,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+		T0:        t0,
+	})
+	require.NoError(t, err)
+
+	result, err := ValidateCustomResult(code, sec, ts, ValidateOpts{
+		Period:    30,
+		Skew:      0,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+		T0:        t0,
+	})
+	require.NoError(t, err)
+	require.True(t, result.Valid)
+	require.Equal(t, 0, result.Delta)
+}
+
+// ===== Zero-value opts to trigger default paths =====
+
+func TestValidateCustomResultZeroOpts(t *testing.T) {
+	sec := "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	ts := time.Unix(60, 0).UTC()
+
+	code, err := GenerateCode(sec, ts) // uses defaults
+	require.NoError(t, err)
+
+	// Zero-value ValidateOpts triggers Period/Digits/Algorithm defaults
+	result, err := ValidateCustomResult(code, sec, ts, ValidateOpts{})
+	require.NoError(t, err)
+	require.True(t, result.Valid)
+	require.Equal(t, 0, result.Delta)
+}
+
+func TestValidateCustomSkewPolicyZeroOpts(t *testing.T) {
+	sec := "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	ts := time.Unix(60, 0).UTC()
+
+	code, err := GenerateCode(sec, ts)
+	require.NoError(t, err)
+
+	// Zero-value opts triggers default paths (Period, Digits, Algorithm)
+	valid, step, delta, err := ValidateCustomSkewPolicy(code, sec, ts, ValidateOptsWithSkewPolicy{})
+	require.NoError(t, err)
+	require.True(t, valid)
+	require.Equal(t, uint64(2), step)
+	require.Equal(t, 0, delta)
+}
+
+func TestValidateCustomStepSkewTooLarge(t *testing.T) {
+	sec := "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	_, _, err := ValidateCustomStep("000000", sec, time.Now().UTC(), ValidateOpts{
+		Skew: 11,
+	})
+	require.Error(t, err)
+	require.Equal(t, otp.ErrWindowTooLarge, err)
+}
+
+func TestGenerateZeroOpts(t *testing.T) {
+	// Zero-value GenerateOpts triggers SecretSize/Digits/Rand defaults
+	key, err := Generate(GenerateOpts{
+		Issuer:      "Test",
+		AccountName: "user@test.com",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, key.Secret())
+	require.Equal(t, otp.DigitsSix, key.Digits())
 }

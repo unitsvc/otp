@@ -19,6 +19,7 @@ package totp
 
 import (
 	"io"
+	"math"
 
 	"github.com/unitsvc/otp"
 	"github.com/unitsvc/otp/hotp"
@@ -115,6 +116,9 @@ type ValidateOpts struct {
 	// Zero value means no replay protection (default).
 	// Use this to prevent reuse of previously validated codes within the same period.
 	AfterStep uint64
+	// T0 is the Unix timestamp (seconds) representing the start of counting time steps.
+	// Defaults to 0 (Unix epoch) per RFC 6238 Section 4.1.
+	T0 int64
 }
 
 // SkewPolicy defines asymmetric tolerance for time-based validation.
@@ -148,6 +152,9 @@ type ValidateOptsWithSkewPolicy struct {
 	Algorithm otp.Algorithm
 	// Encoder to use for output code.
 	Encoder otp.Encoder
+	// T0 is the Unix timestamp (seconds) representing the start of counting time steps.
+	// Defaults to 0 (Unix epoch) per RFC 6238 Section 4.1.
+	T0 int64
 }
 
 // GenerateCodeCustom takes a timepoint and produces a passcode using a
@@ -170,7 +177,7 @@ func GenerateCodeCustom(secret string, t time.Time, opts ValidateOpts) (passcode
 		return "", otp.ErrPeriodOutOfRange
 	}
 
-	counter := Counter(opts.Period, t)
+	counter := CounterWithT0(opts.Period, opts.T0, t)
 	passcode, err = hotp.GenerateCodeCustom(secret, counter, hotp.ValidateOpts{
 		Digits:    opts.Digits,
 		Algorithm: opts.Algorithm,
@@ -186,10 +193,30 @@ func GenerateCodeCustom(secret string, t time.Time, opts ValidateOpts) (passcode
 // This is the number of time periods that have elapsed since Unix epoch.
 // counter = floor(timestamp_seconds / period)
 func Counter(period uint, t time.Time) uint64 {
+	return CounterWithT0(period, 0, t)
+}
+
+// CounterWithT0 calculates the time step counter with a configurable T0 epoch offset.
+// T0 is the Unix timestamp (in seconds) representing the start of counting.
+// Per RFC 6238 Section 4.1, the default T0 is 0 (Unix epoch).
+// counter = floor((timestamp_seconds - t0) / period)
+func CounterWithT0(period uint, t0 int64, t time.Time) uint64 {
 	if period == 0 {
 		period = 30
 	}
-	return uint64(t.Unix()) / uint64(period)
+	// RFC 6238 Section 4.1: T = floor((CurrentTime - T0) / X)
+	// Negative T0 is valid: T0=-1000 means counting started 1000s before Unix epoch.
+	ts := t.Unix() - t0
+	// Protect against overflow: if t0 is very negative, the subtraction could overflow int64.
+	// Detect overflow by checking if the result has the wrong sign.
+	if t0 < 0 && ts < t.Unix() {
+		// Overflow: t.Unix() - t0 wrapped negative. Clamp to a safe large value.
+		ts = math.MaxInt64
+	}
+	if ts < 0 {
+		ts = 0
+	}
+	return uint64(ts) / uint64(period)
 }
 
 // Remaining returns the remaining time in milliseconds until the next TOTP
@@ -198,11 +225,37 @@ func Counter(period uint, t time.Time) uint64 {
 // For example, with period=30 and timestamp at 15 seconds into the period,
 // Remaining returns 15000 (15 seconds remaining).
 func Remaining(period uint, t time.Time) uint64 {
+	return RemainingWithT0(period, 0, t)
+}
+
+// RemainingWithT0 returns the remaining time in milliseconds until the next TOTP
+// is generated, accounting for a configurable T0 epoch offset.
+func RemainingWithT0(period uint, t0 int64, t time.Time) uint64 {
 	if period == 0 {
 		period = 30
 	}
 	periodMs := uint64(period) * 1000
-	timestampMs := uint64(t.UnixMilli())
+	// RFC 6238: elapsed = (timestamp - T0). Negative T0 is valid.
+	// Use UnixMilli for elapsed calculation to avoid t0*1000 overflow.
+	// For extreme T0 values, clamp elapsed to avoid incorrect results.
+	var elapsedMs int64
+	if t0 > 0 && t0 < t.Unix() {
+		// Normal case: T0 in the past, safe to compute directly
+		elapsedMs = t.UnixMilli() - t0*1000
+	} else if t0 <= 0 {
+		// T0 is zero or negative: t.UnixMilli() - t0*1000 is always positive
+		// but t0*1000 may overflow for MinInt64. Use addition instead.
+		elapsedMs = t.UnixMilli() + (-t0)*1000
+	} else {
+		// T0 is in the future: elapsed should be 0 or negative
+		// t0 > t.Unix(), so t0*1000 may overflow. Use safe subtraction.
+		// If t0 > t.Unix(), then elapsedMs < 0.
+		elapsedMs = 0
+	}
+	if elapsedMs < 0 {
+		elapsedMs = 0
+	}
+	timestampMs := uint64(elapsedMs)
 	return periodMs - (timestampMs % periodMs)
 }
 
@@ -216,6 +269,31 @@ func RemainingDefault(t time.Time) uint64 {
 func ValidateCustom(passcode string, secret string, t time.Time, opts ValidateOpts) (bool, error) {
 	valid, _, err := ValidateCustomStep(passcode, secret, t, opts)
 	return valid, err
+}
+
+// ValidateCustomResult validates a TOTP and returns a structured result with
+// metadata for replay protection and clock drift detection.
+func ValidateCustomResult(passcode string, secret string, t time.Time, opts ValidateOpts) (*otp.ValidationResult, error) {
+	if opts.Period == 0 {
+		opts.Period = 30
+	}
+	if opts.Digits == 0 {
+		opts.Digits = otp.DigitsSix
+	}
+	if opts.Algorithm == 0 {
+		opts.Algorithm = otp.AlgorithmSHA1
+	}
+	expectedStep := CounterWithT0(opts.Period, opts.T0, t)
+	valid, step, err := ValidateCustomStep(passcode, secret, t, opts)
+	if err != nil {
+		return nil, err
+	}
+	delta := int(step) - int(expectedStep)
+	return &otp.ValidationResult{
+		Valid: valid,
+		Step:  step,
+		Delta: delta,
+	}, nil
 }
 
 // ValidateStep validates a TOTP using the current time and returns the
@@ -261,7 +339,7 @@ func ValidateCustomStep(passcode string, secret string, t time.Time, opts Valida
 	// Pre-allocate steps slice: 1 (current) + 2*Skew (past + future for each skew level)
 	maxSteps := 1 + 2*opts.Skew
 	steps := make([]uint64, 0, maxSteps)
-	step := Counter(opts.Period, t)
+	step := CounterWithT0(opts.Period, opts.T0, t)
 
 	steps = append(steps, step)
 	for i := uint64(1); i <= uint64(opts.Skew); i++ {
@@ -331,7 +409,7 @@ func ValidateCustomSkewPolicy(passcode string, secret string, t time.Time, opts 
 		return false, 0, 0, otp.ErrWindowTooLarge
 	}
 
-	step := Counter(opts.Period, t)
+	step := CounterWithT0(opts.Period, opts.T0, t)
 
 	// Check exact step first
 	rv, err := hotp.ValidateCustom(passcode, step, secret, hotp.ValidateOpts{
@@ -426,6 +504,14 @@ type GenerateOpts struct {
 	// string to work around a GA parsing bug. Default is false.
 	// See: https://github.com/pquerna/otp/issues/94
 	GoogleAuthenticatorCompat bool
+	// ExtraParams are additional query parameters to include in the otpauth:// URI.
+	// Useful for custom parameters like "lock", "type" etc.
+	ExtraParams map[string]string
+	// IssuerInLabel controls whether the issuer appears in the URI label path.
+	// The default behavior (false) is to include issuer in the label (e.g., "Issuer:Account").
+	// Set to true to omit issuer from the label path and only include it as a query parameter.
+	// Note: Most authenticator apps expect issuer in the label.
+	IssuerInLabelOmit bool
 }
 
 var b32NoPadding = base32.StdEncoding.WithPadding(base32.NoPadding)
@@ -501,11 +587,15 @@ func Generate(opts GenerateOpts) (*otp.Key, error) {
 		v.Set("encoder", string(opts.Encoder))
 	}
 
-	rawPath := "/" + url.PathEscape(opts.Issuer) + ":" + url.PathEscape(opts.AccountName)
+	// Add extra custom parameters
+	internal.SetExtraParams(v, opts.ExtraParams, 1024)
+
+	// Build label path
+	path, rawPath := internal.BuildLabelPath(opts.Issuer, opts.AccountName, opts.IssuerInLabelOmit)
 	u := url.URL{
 		Scheme:   "otpauth",
 		Host:     "totp",
-		Path:     "/" + opts.Issuer + ":" + opts.AccountName,
+		Path:     path,
 		RawPath:  rawPath,
 		RawQuery: internal.EncodeQueryTrailing(v, opts.GoogleAuthenticatorCompat),
 	}

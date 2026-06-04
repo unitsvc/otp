@@ -408,3 +408,165 @@ func TestAlgorithmHashAll(t *testing.T) {
 		require.NotNil(t, h, "Hash() returned nil for %v", alg)
 	}
 }
+
+// ===== ParseAlgorithm tests =====
+
+func TestParseAlgorithm(t *testing.T) {
+	tests := []struct {
+		input string
+		want  Algorithm
+	}{
+		{"SHA1", AlgorithmSHA1},
+		{"SHA-1", AlgorithmSHA1},
+		{"sha1", AlgorithmSHA1},
+		{"SHA256", AlgorithmSHA256},
+		{"SHA-256", AlgorithmSHA256},
+		{"SHA2-256", AlgorithmSHA256},
+		{"sha256", AlgorithmSHA256},
+		{"SHA512", AlgorithmSHA512},
+		{"SHA-512", AlgorithmSHA512},
+		{"MD5", AlgorithmMD5},
+		{"md5", AlgorithmMD5},
+		{"SHA224", AlgorithmSHA224},
+		{"SHA384", AlgorithmSHA384},
+		{"SHA3-224", AlgorithmSHA3_224},
+		{"SHA3-256", AlgorithmSHA3_256},
+		{"SHA3-384", AlgorithmSHA3_384},
+		{"SHA3-512", AlgorithmSHA3_512},
+		{"SSL3-SHA1", AlgorithmSHA1},
+	}
+	for _, tt := range tests {
+		got, err := ParseAlgorithm(tt.input)
+		require.NoError(t, err, "ParseAlgorithm(%q) error", tt.input)
+		require.Equal(t, tt.want, got, "ParseAlgorithm(%q)", tt.input)
+	}
+}
+
+func TestParseAlgorithmInvalid(t *testing.T) {
+	_, err := ParseAlgorithm("INVALID")
+	require.Error(t, err)
+	require.Equal(t, ErrInvalidAlgorithm, err)
+}
+
+// ===== IsValid tests =====
+
+func TestAlgorithmIsValid(t *testing.T) {
+	valid := []Algorithm{
+		AlgorithmSHA1, AlgorithmSHA256, AlgorithmSHA512, AlgorithmMD5,
+		AlgorithmSHA224, AlgorithmSHA384,
+		AlgorithmSHA3_224, AlgorithmSHA3_256, AlgorithmSHA3_384, AlgorithmSHA3_512,
+	}
+	for _, alg := range valid {
+		require.True(t, alg.IsValid(), "IsValid() should be true for %s", alg)
+	}
+
+	require.False(t, Algorithm(999).IsValid(), "unknown algorithm should not be valid")
+}
+
+// ===== HashChecked tests =====
+
+func TestAlgorithmHashChecked(t *testing.T) {
+	h, err := AlgorithmSHA256.HashChecked()
+	require.NoError(t, err)
+	require.NotNil(t, h)
+	require.Equal(t, 32, h.Size())
+}
+
+func TestAlgorithmHashCheckedInvalid(t *testing.T) {
+	h, err := Algorithm(999).HashChecked()
+	require.Error(t, err)
+	require.Equal(t, ErrInvalidAlgorithm, err)
+	require.Nil(t, h)
+}
+
+// ===== Key.Counter tests =====
+
+func TestKeyCounter(t *testing.T) {
+	k, err := NewKeyFromURL(`otpauth://hotp/Example:alice?secret=JBSWY3DPEHPK3PXP&counter=42`)
+	require.NoError(t, err)
+	require.Equal(t, uint64(42), k.Counter())
+}
+
+func TestKeyCounterDefault(t *testing.T) {
+	k, err := NewKeyFromURL(`otpauth://hotp/Example:alice?secret=JBSWY3DPEHPK3PXP`)
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), k.Counter())
+}
+
+// ===== Key.GetExtraParam tests =====
+
+func TestKeyGetExtraParam(t *testing.T) {
+	k, err := NewKeyFromURL(`otpauth://totp/Example:alice?secret=JBSWY3DPEHPK3PXP&source=web&lock=true`)
+	require.NoError(t, err)
+	require.Equal(t, "web", k.GetExtraParam("source"))
+	require.Equal(t, "true", k.GetExtraParam("lock"))
+	require.Equal(t, "", k.GetExtraParam("nonexistent"))
+}
+
+// ===== Nil Key receiver tests =====
+
+func TestKeyNilReceivers(t *testing.T) {
+	k := &Key{} // url is nil
+	require.Equal(t, "", k.Type())
+	require.Equal(t, "", k.Issuer())
+	require.Equal(t, "", k.AccountName())
+	require.Equal(t, "", k.Secret())
+	require.Equal(t, uint64(30), k.Period())
+	require.Equal(t, DigitsSix, k.Digits())
+	require.Equal(t, AlgorithmSHA1, k.Algorithm())
+	require.Equal(t, EncoderDefault, k.Encoder())
+	require.Equal(t, uint64(0), k.Counter())
+	require.Equal(t, "", k.URL())
+	require.Equal(t, "", k.ImageURL())
+	require.Equal(t, "", k.GetExtraParam("any"))
+}
+
+// ===== CRLF injection rejection =====
+
+func TestNewKeyFromURLCRLFInIssuer(t *testing.T) {
+	_, err := NewKeyFromURL("otpauth://totp/Test%0AEvil:user@test.com?secret=JBSWY3DPEHPK3PXP&issuer=Test%0AEvil")
+	require.Error(t, err)
+	require.Equal(t, ErrInvalidURIChars, err)
+}
+
+func TestNewKeyFromURLNullInAccount(t *testing.T) {
+	_, err := NewKeyFromURL("otpauth://totp/Test:user%00@test.com?secret=JBSWY3DPEHPK3PXP")
+	require.Error(t, err)
+	require.Equal(t, ErrInvalidURIChars, err)
+}
+
+func TestNewKeyFromURLTooLong(t *testing.T) {
+	longURI := "otpauth://totp/Test:user@test.com?secret=JBSWY3DPEHPK3PXP&padding=" + string(make([]byte, 2500))
+	_, err := NewKeyFromURL(longURI)
+	require.Error(t, err)
+	require.Equal(t, ErrURITooLong, err)
+}
+
+func TestNewKeyFromURLValidShortPath(t *testing.T) {
+	// Normal URI should still work
+	_, err := NewKeyFromURL("otpauth://totp/Test:user@test.com?secret=JBSWY3DPEHPK3PXP&issuer=Test")
+	require.NoError(t, err)
+}
+
+// ===== AlgorithmStringUnknown test =====
+
+func TestAlgorithmStringUnknown(t *testing.T) {
+	require.Equal(t, "UNKNOWN(999)", Algorithm(999).String())
+}
+
+// ===== Hash fallback for unknown algorithm =====
+
+func TestAlgorithmHashUnknown(t *testing.T) {
+	h := Algorithm(999).Hash()
+	require.NotNil(t, h) // falls back to SHA1
+	require.Equal(t, 20, h.Size())
+}
+
+// ===== Image error path (invalid QR data) =====
+
+func TestKeyImageQRError(t *testing.T) {
+	// Create a key with an extremely long string that will fail QR encoding
+	k := &Key{orig: string(make([]byte, 10000))}
+	_, err := k.Image(200, 200)
+	require.Error(t, err)
+}

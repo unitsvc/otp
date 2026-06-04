@@ -9,6 +9,16 @@
 //	go run ./example/otp/main.go      — Core package (Key, URI, algorithms)
 //
 // Run this example: go run ./example/main.go
+//
+// Feature highlights across examples:
+//
+//	TOTP:  ValidateCustomResult, SkewPolicy, AfterStep (replay), ExtraParams,
+//	       IssuerInLabelOmit, GoogleAuthenticatorCompat, CounterWithT0/RemainingWithT0
+//	HOTP:  Window validation, AfterCounter (replay), ExtraParams, IssuerInLabelOmit,
+//	       GoogleAuthenticatorCompat, NFKC normalization
+//	OTP:   Algorithm aliases (SHA-256, SHA2-256, SSL3-SHA1), HashChecked, GetExtraParam,
+//	       ValidationResult, Steam Guard encoder
+//	Secret: New/FromBase32/FromHex/FromBytes, Clear(), Bytes() (independent copy)
 package main
 
 import (

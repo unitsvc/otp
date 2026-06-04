@@ -211,4 +211,51 @@ func main() {
 			fmt.Printf("  %q -> %s\n", a, alg.String())
 		}
 	}
+	fmt.Println()
+
+	// --- 12. ExtraParams (custom URI parameters) ---
+	fmt.Println("--- 12. ExtraParams (custom URI parameters) ---")
+	s2, _ := secret.New(20)
+	keyEP, err := hotp.Generate(hotp.GenerateOpts{
+		Issuer:      "Example.com",
+		AccountName: "alice@example.com",
+		Secret:      s2.Bytes(),
+		Counter:     0,
+		ExtraParams: map[string]string{"source": "cli", "version": "2"},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("  URI with extras:\n    %s\n\n", keyEP.URL())
+	fmt.Printf("  GetExtraParam(source):  %q\n", keyEP.GetExtraParam("source"))
+	fmt.Printf("  GetExtraParam(version): %q\n", keyEP.GetExtraParam("version"))
+	fmt.Println()
+
+	// --- 13. IssuerInLabelOmit ---
+	fmt.Println("--- 13. IssuerInLabelOmit ---")
+	keyLabel, err := hotp.Generate(hotp.GenerateOpts{
+		Issuer:            "Example.com",
+		AccountName:       "alice@example.com",
+		Secret:            s2.Bytes(),
+		Counter:           0,
+		IssuerInLabelOmit: true,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("  Without issuer in label:\n    %s\n\n", keyLabel.URL())
+
+	// --- 14. GoogleAuthenticatorCompat ---
+	fmt.Println("--- 14. GoogleAuthenticatorCompat (trailing &) ---")
+	keyGA, err := hotp.Generate(hotp.GenerateOpts{
+		Issuer:                    "Example.com",
+		AccountName:               "alice@example.com",
+		Secret:                    s2.Bytes(),
+		Counter:                   0,
+		GoogleAuthenticatorCompat: true,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("  URI with trailing &:\n    %s\n\n", keyGA.URL())
 }
