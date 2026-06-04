@@ -400,6 +400,10 @@ func ValidateCustomWindow(passcode string, counter uint64, secret string, opts V
 
 		// Check counter + i (future)
 		c := counter + i
+		if c < counter {
+			// uint64 overflow: counter + i wrapped around, skip
+			continue
+		}
 		if opts.AfterCounter == 0 || c > opts.AfterCounter {
 			valid, err = checkCounter(c)
 			if err != nil {
@@ -442,6 +446,10 @@ type GenerateOpts struct {
 	// string to work around a GA parsing bug. Default is false.
 	// See: https://github.com/pquerna/otp/issues/94
 	GoogleAuthenticatorCompat bool
+	// ExtraParams are additional query parameters to include in the otpauth:// URI.
+	ExtraParams map[string]string
+	// IssuerInLabelOmit controls whether to omit the issuer from the URI label path.
+	IssuerInLabelOmit bool
 }
 
 var b32NoPadding = base32.StdEncoding.WithPadding(base32.NoPadding)
@@ -467,6 +475,21 @@ func Generate(opts GenerateOpts) (*otp.Key, error) {
 
 	if opts.Rand == nil {
 		opts.Rand = rand.Reader
+	}
+
+	// Validate parameters match GenerateCodeCustom guardrails
+	if opts.SecretSize < 16 {
+		return nil, otp.ErrSecretTooShort
+	}
+	if opts.SecretSize > 64 {
+		return nil, otp.ErrSecretTooLong
+	}
+	digitsVal := int(opts.Digits)
+	if digitsVal < 6 || digitsVal > 10 {
+		return nil, otp.ErrDigitsOutOfRange
+	}
+	if !opts.Algorithm.IsValid() {
+		return nil, otp.ErrInvalidAlgorithm
 	}
 
 	// Validate ImageURL if provided
@@ -507,11 +530,15 @@ func Generate(opts GenerateOpts) (*otp.Key, error) {
 		v.Set("image", opts.ImageURL)
 	}
 
-	rawPath := "/" + url.PathEscape(opts.Issuer) + ":" + url.PathEscape(opts.AccountName)
+	// Add extra custom parameters
+	internal.SetExtraParams(v, opts.ExtraParams, 1024)
+
+	// Build label path
+	path, rawPath := internal.BuildLabelPath(opts.Issuer, opts.AccountName, opts.IssuerInLabelOmit)
 	u := url.URL{
 		Scheme:   "otpauth",
 		Host:     "hotp",
-		Path:     "/" + opts.Issuer + ":" + opts.AccountName,
+		Path:     path,
 		RawPath:  rawPath,
 		RawQuery: internal.EncodeQueryTrailing(v, opts.GoogleAuthenticatorCompat),
 	}

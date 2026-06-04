@@ -84,6 +84,15 @@ func main() {
 	fmt.Printf("  RemainingDefault(now):      %d ms\n", remainingDefault)
 	fmt.Println()
 
+	// --- 5b. T0 epoch offset ---
+	fmt.Println("--- 5b. T0 epoch offset (CounterWithT0 / RemainingWithT0) ---")
+	t0 := int64(1700000000) // Custom epoch: ~2023-11-14
+	stepT0 := totp.CounterWithT0(30, t0, now)
+	remainT0 := totp.RemainingWithT0(30, t0, now)
+	fmt.Printf("  CounterWithT0(30, T0=%d, now): %d\n", t0, stepT0)
+	fmt.Printf("  RemainingWithT0(30, T0=%d):     %d ms\n", t0, remainT0)
+	fmt.Println()
+
 	// --- 6. Step-based validation (for replay protection) ---
 	fmt.Println("--- 6. ValidateCustomStep (returns time step) ---")
 	code, _ = totp.GenerateCode(testSecret, now)
@@ -251,4 +260,62 @@ func main() {
 		log.Fatal(err)
 	}
 	fmt.Printf("  URI with SHA-256 alias -> Algorithm=%s, Digits=%d\n", keyAlias.Algorithm().String(), keyAlias.Digits())
+	fmt.Println()
+
+	// --- 14. ValidateCustomResult (structured validation result) ---
+	fmt.Println("--- 14. ValidateCustomResult ---")
+	code, _ = totp.GenerateCode(testSecret, now)
+	vr, err := totp.ValidateCustomResult(code, testSecret, now, totp.ValidateOpts{
+		Period:    30,
+		Skew:      1,
+		Digits:    otp.DigitsSix,
+		Algorithm: otp.AlgorithmSHA1,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("  Valid=%v, Step=%d, Delta=%d\n", vr.Valid, vr.Step, vr.Delta)
+	fmt.Println()
+
+	// --- 15. ExtraParams (custom URI parameters) ---
+	fmt.Println("--- 15. ExtraParams (custom URI parameters) ---")
+	keyEP, err := totp.Generate(totp.GenerateOpts{
+		Issuer:      "Example.com",
+		AccountName: "alice@example.com",
+		Secret:      s.Bytes(),
+		ExtraParams: map[string]string{"source": "web", "lock": "true"},
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("  URI with extras:\n    %s\n\n", keyEP.URL())
+	fmt.Printf("  GetExtraParam(source): %q\n", keyEP.GetExtraParam("source"))
+	fmt.Printf("  GetExtraParam(lock):   %q\n", keyEP.GetExtraParam("lock"))
+	fmt.Println()
+
+	// --- 16. IssuerInLabelOmit ---
+	fmt.Println("--- 16. IssuerInLabelOmit ---")
+	keyLabel, err := totp.Generate(totp.GenerateOpts{
+		Issuer:            "Example.com",
+		AccountName:       "alice@example.com",
+		Secret:            s.Bytes(),
+		IssuerInLabelOmit: true,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("  Without issuer in label:\n    %s\n\n", keyLabel.URL())
+
+	// --- 17. GoogleAuthenticatorCompat ---
+	fmt.Println("--- 17. GoogleAuthenticatorCompat (trailing &) ---")
+	keyGA, err := totp.Generate(totp.GenerateOpts{
+		Issuer:                    "Example.com",
+		AccountName:               "alice@example.com",
+		Secret:                    s.Bytes(),
+		GoogleAuthenticatorCompat: true,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("  URI with trailing &:\n    %s\n\n", keyGA.URL())
 }

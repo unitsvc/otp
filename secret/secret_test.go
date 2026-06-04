@@ -166,6 +166,10 @@ func TestSecretBase32(t *testing.T) {
 	b32pad := s.Base32WithPadding()
 	require.Contains(t, b32pad, "=")
 	require.Equal(t, 32, len(b32pad)) // padded to multiple of 8
+
+	// After Clear, returns empty string
+	s.Clear()
+	require.Equal(t, "", s.Base32WithPadding())
 }
 
 func TestSecretHex(t *testing.T) {
@@ -234,4 +238,20 @@ func TestClear(t *testing.T) {
 
 	// Bytes() should return nil
 	require.Nil(t, s.Bytes())
+}
+
+func TestBase32AfterClear(t *testing.T) {
+	s, err := New(20)
+	require.NoError(t, err)
+	require.NotEmpty(t, s.Base32())
+	s.Clear()
+	require.Equal(t, "", s.Base32())
+}
+
+func TestHexAfterClear(t *testing.T) {
+	s, err := New(20)
+	require.NoError(t, err)
+	require.NotEmpty(t, s.Hex())
+	s.Clear()
+	require.Equal(t, "", s.Hex())
 }

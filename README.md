@@ -87,18 +87,21 @@ sec.Clear()
 
 ### Core Types (`otp` package)
 
-| Type              | Description                                                                                                                                                                                                     |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Algorithm`       | Hash algorithm: `AlgorithmSHA1`, `AlgorithmSHA256`, `AlgorithmSHA512`, `AlgorithmSHA224`, `AlgorithmSHA384`, `AlgorithmSHA3_224`, `AlgorithmSHA3_256`, `AlgorithmSHA3_384`, `AlgorithmSHA3_512`, `AlgorithmMD5` |
-| `AlgorithmCompat` | Alias for `AlgorithmSHA1` (Google Authenticator compatible)                                                                                                                                                     |
-| `AlgorithmSecure` | Alias for `AlgorithmSHA256` (recommended)                                                                                                                                                                       |
-| `Digits`          | Digit count: `DigitsSix` (default), `DigitsEight`                                                                                                                                                               |
-| `Encoder`         | Output format: `EncoderDefault`, `EncoderSteam`                                                                                                                                                                 |
-| `Key`             | Represents an OTP key with methods: `Secret()`, `Issuer()`, `AccountName()`, `Algorithm()`, `Digits()`, `Period()`, `Counter()`, `URL()`, `Image()`, `ImageURL()`                                               |
+| Type               | Description                                                                                                                                                                                                     |
+| ------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Algorithm`        | Hash algorithm: `AlgorithmSHA1`, `AlgorithmSHA256`, `AlgorithmSHA512`, `AlgorithmSHA224`, `AlgorithmSHA384`, `AlgorithmSHA3_224`, `AlgorithmSHA3_256`, `AlgorithmSHA3_384`, `AlgorithmSHA3_512`, `AlgorithmMD5` |
+| `AlgorithmCompat`  | Alias for `AlgorithmSHA1` (Google Authenticator compatible)                                                                                                                                                     |
+| `AlgorithmSecure`  | Alias for `AlgorithmSHA256` (recommended)                                                                                                                                                                       |
+| `Digits`           | Digit count: `DigitsSix` (default), `DigitsEight`                                                                                                                                                               |
+| `Encoder`          | Output format: `EncoderDefault`, `EncoderSteam`                                                                                                                                                                 |
+| `Key`              | OTP key with methods: `Type()`, `Secret()`, `Issuer()`, `AccountName()`, `Algorithm()`, `Digits()`, `Period()`, `Counter()`, `URL()`, `Image()`, `ImageURL()`, `Encoder()`, `GetExtraParam(name)`               |
+| `ValidationResult` | Structured validation result: `Valid`, `Delta` (offset from expected), `Step` (matched counter/step)                                                                                                            |
 
 ```go
-algo, _ := otp.ParseAlgorithm("SHA256")     // parse from string
+algo, _ := otp.ParseAlgorithm("SHA256")     // parse from string (accepts aliases: SHA-256, SHA2-256, SSL3-SHA1)
 key, _ := otp.NewKeyFromURL("otpauth://...")  // parse otpauth URI
+h, _ := algo.HashChecked()                    // safe hash accessor (errors on unknown algorithms)
+key.GetExtraParam("source")                   // read custom URI parameter → "web"
 ```
 
 ### TOTP (`totp` package)
@@ -108,14 +111,20 @@ key, _ := otp.NewKeyFromURL("otpauth://...")  // parse otpauth URI
 | `Validate(passcode, secret string) bool`                                                | Validate with defaults (SHA1, 30s, 6 digits) |
 | `ValidateSecure(passcode, secret string) bool`                                          | Validate with SHA256                         |
 | `GenerateCode(secret string, t time.Time) (string, error)`                              | Generate code with defaults                  |
+| `GenerateCodeSecure(secret string, t time.Time) (string, error)`                        | Generate code with SHA256                    |
 | `GenerateCodeCustom(secret string, t time.Time, opts ValidateOpts) (string, error)`     | Generate with custom opts                    |
 | `ValidateCustom(passcode, secret string, t time.Time, opts ValidateOpts) (bool, error)` | Validate with custom opts                    |
 | `ValidateCustomStep(...)`                                                               | Validate and return the matched time step    |
+| `ValidateCustomResult(...)`                                                             | Validate and return `ValidationResult`       |
+| `ValidateStep(passcode, secret string) (bool, uint64)`                                  | Convenience: validate + return step          |
 | `ValidateCustomSkewPolicy(...)`                                                         | Validate with asymmetric past/future skew    |
-| `ValidateRFCCompliant(...)`                                                             | RFC 6238-compliant validation                |
+| `ValidateRFCCompliant(...)`                                                             | RFC 6238-compliant validation (past only)    |
 | `Generate(opts GenerateOpts) (*otp.Key, error)`                                         | Create a new TOTP key                        |
-| `Counter(period uint, t time.Time) uint64`                                              | Calculate time-step counter                  |
-| `Remaining(period uint, t time.Time) uint64`                                            | Milliseconds until next rotation             |
+| `Counter(period uint, t time.Time) uint64`                                              | Calculate time-step counter (T0=0)           |
+| `CounterWithT0(period uint, t0 int64, t time.Time) uint64`                              | Counter with custom T0 epoch offset          |
+| `Remaining(period uint, t time.Time) uint64`                                            | Milliseconds until next rotation (T0=0)      |
+| `RemainingWithT0(period uint, t0 int64, t time.Time) uint64`                            | Remaining with custom T0 epoch offset        |
+| `RemainingDefault(t time.Time) uint64`                                                  | Remaining with period=30                     |
 
 ```go
 // Custom algorithm and digits
@@ -130,6 +139,10 @@ valid, step, _ := totp.ValidateCustomStep(code, secret, time.Now(), totp.Validat
     Period:    30,
     AfterStep: lastUsedStep, // zero-value = disabled
 })
+
+// Structured result with clock drift detection
+result, _ := totp.ValidateCustomResult(code, secret, time.Now(), opts)
+fmt.Println(result.Delta) // 0=exact, -1=past, +1=future
 ```
 
 ### HOTP (`hotp` package)
@@ -137,8 +150,12 @@ valid, step, _ := totp.ValidateCustomStep(code, secret, time.Now(), totp.Validat
 | Function                                                                                                               | Description                              |
 | ---------------------------------------------------------------------------------------------------------------------- | ---------------------------------------- |
 | `Validate(passcode string, counter uint64, secret string) bool`                                                        | Validate with defaults                   |
+| `ValidateSecure(passcode string, counter uint64, secret string) bool`                                                  | Validate with SHA256                     |
 | `GenerateCode(secret string, counter uint64) (string, error)`                                                          | Generate code                            |
+| `GenerateCodeSecure(secret string, counter uint64) (string, error)`                                                    | Generate code with SHA256                |
 | `GenerateCodeCustom(secret string, counter uint64, opts ValidateOpts) (string, error)`                                 | Generate with custom opts                |
+| `ValidateCustom(passcode string, counter uint64, secret string, opts ValidateOpts) (bool, error)`                      | Validate with custom opts                |
+| `ValidateCustomNormalized(passcode string, counter uint64, secret string, opts ValidateOpts) (bool, error)`            | Validate with NFKC normalization         |
 | `ValidateCustomWindow(passcode string, counter uint64, secret string, opts ValidateOptsWithWindow) (int, bool, error)` | Window validation with replay protection |
 | `Generate(opts GenerateOpts) (*otp.Key, error)`                                                                        | Create a new HOTP key                    |
 
@@ -203,10 +220,56 @@ key, _ := totp.Generate(totp.GenerateOpts{
     Digits:      otp.DigitsEight,
     Period:      60,
     SecretSize:  32,
+    ExtraParams: map[string]string{"source": "web"}, // custom URI parameters
 })
 // URI omits default params (SHA1, 6 digits, 30s) for compact QR codes
 fmt.Println(key.URL())
-// otpauth://totp/MyApp:user@example.com?algorithm=SHA256&digits=8&period=60&...
+// otpauth://totp/MyApp:user@example.com?algorithm=SHA256&digits=8&period=60&source=web&...
+
+// Read custom params back from a parsed key
+key.GetExtraParam("source") // → "web"
+```
+
+### SkewPolicy — Asymmetric Time Window
+
+```go
+// RFC 6238 recommended: allow 1 past period only (no future)
+valid, step, delta, _ := totp.ValidateCustomSkewPolicy(code, secret, time.Now(),
+    totp.ValidateOptsWithSkewPolicy{
+        SkewPolicy: totp.SkewPolicy{Past: 1, Future: 0},
+    })
+```
+
+### Google Authenticator Compatibility
+
+```go
+// Append trailing & to work around Google Authenticator parsing bug
+// See: https://github.com/pquerna/otp/issues/94
+key, _ := totp.Generate(totp.GenerateOpts{
+    Issuer:                    "MyApp",
+    AccountName:               "user@example.com",
+    GoogleAuthenticatorCompat: true,
+})
+```
+
+### T0 Epoch Offset
+
+```go
+// Custom epoch for time-step calculation (default T0=0 = Unix epoch)
+step := totp.CounterWithT0(30, 1700000000, time.Now())
+remaining := totp.RemainingWithT0(30, 1700000000, time.Now())
+```
+
+### IssuerInLabelOmit
+
+```go
+// Omit issuer from URI label path (only in query parameter)
+key, _ := totp.Generate(totp.GenerateOpts{
+    Issuer:            "MyApp",
+    AccountName:       "user@example.com",
+    IssuerInLabelOmit: true,
+})
+// otpauth://totp/user@example.com?issuer=MyApp&secret=...
 ```
 
 ## Algorithm Support
@@ -231,9 +294,9 @@ Aliases: `ParseAlgorithm` accepts `"SHA-256"`, `"SHA2-256"`, `"SSL3-SHA1"` etc.
 See the [`example/`](./example) directory for complete working programs:
 
 - [`example/main.go`](./example/main.go) — Basic TOTP enrollment with QR code
-- [`example/totp/`](./example/totp/) — TOTP features (algorithms, skew, Steam, validation)
-- [`example/hotp/`](./example/hotp/) — HOTP features (counter, window, replay protection)
-- [`example/otp/`](./example/otp/) — Core types (algorithms, digits, encoders, URI parsing)
+- [`example/totp/`](./example/totp/) — TOTP features (algorithms, SkewPolicy, Steam, replay, ExtraParams, GoogleAuthenticatorCompat)
+- [`example/hotp/`](./example/hotp/) — HOTP features (counter, window, replay protection, ExtraParams, GoogleAuthenticatorCompat)
+- [`example/otp/`](./example/otp/) — Core types (algorithms, URI parsing, HashChecked, GetExtraParam, ValidationResult)
 - [`example/secret/`](./example/secret/) — Secret management (generate, import, clear)
 
 ## Security Considerations

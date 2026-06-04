@@ -43,10 +43,10 @@ var ErrValidateSecretInvalidBase32 = errors.New("decoding of secret as base32 fa
 var ErrValidateInputInvalidLength = errors.New("input length unexpected")
 
 // When generating a Key, the Issuer must be set.
-var ErrGenerateMissingIssuer = errors.New("Issuer must be set")
+var ErrGenerateMissingIssuer = errors.New("issuer must be set")
 
 // When generating a Key, the Account Name must be set.
-var ErrGenerateMissingAccountName = errors.New("AccountName must be set")
+var ErrGenerateMissingAccountName = errors.New("accountName must be set")
 
 // URI format validation errors.
 var ErrInvalidURIFormat = errors.New("invalid URI format")
@@ -74,6 +74,20 @@ var ErrPeriodOutOfRange = errors.New("period out of range, must be between 1 and
 var ErrInvalidEncoder = errors.New("invalid encoder: must be EncoderDefault or EncoderSteam")
 var ErrInvalidImageURL = errors.New("image URL must be a valid HTTPS URL")
 var ErrValidateInputInvalidChars = errors.New("passcode contains invalid characters")
+var ErrInvalidURIChars = errors.New("issuer or account name contains invalid characters (control chars)")
+
+// ValidationResult provides a structured result for OTP validation operations.
+// It includes details about whether validation succeeded and metadata about
+// the match for replay protection and clock drift detection.
+type ValidationResult struct {
+	// Valid indicates whether the passcode was accepted.
+	Valid bool
+	// Delta is the offset from the expected counter/step (0 = exact match,
+	// negative = past, positive = future). Useful for clock drift detection.
+	Delta int
+	// Step is the matched time step (TOTP) or counter value (HOTP) for replay prevention tracking.
+	Step uint64
+}
 
 // Validation regex patterns
 var (
@@ -105,6 +119,17 @@ func normalizeAlgorithmName(name string) string {
 	return s
 }
 
+// containsControlChars reports whether s contains ASCII control characters
+// (U+0000-U+001F, U+007F) excluding common whitespace (space, tab).
+func containsControlChars(s string) bool {
+	for _, c := range s {
+		if c < 0x20 || c == 0x7F {
+			return true
+		}
+	}
+	return false
+}
+
 // Key represents a TOTP or HOTP key.
 type Key struct {
 	orig string
@@ -125,6 +150,11 @@ type Key struct {
 // - Rejects URIs with colons in parsed issuer or account name
 func NewKeyFromURL(orig string) (*Key, error) {
 	s := strings.TrimSpace(orig)
+
+	// 0. Validate URI length to prevent memory exhaustion
+	if len(s) > 2048 {
+		return nil, ErrURITooLong
+	}
 
 	// 1. Validate URI scheme
 	if !strings.HasPrefix(s, "otpauth://") {
@@ -187,7 +217,7 @@ func NewKeyFromURL(orig string) (*Key, error) {
 		url:  u,
 	}
 
-	// 9. Validate no colons in issuer or account name (IETF draft requirement)
+	// 9. Validate no colons or control characters in issuer or account name
 	issuer := k.Issuer()
 	account := k.AccountName()
 	if strings.Contains(issuer, ":") {
@@ -195,6 +225,11 @@ func NewKeyFromURL(orig string) (*Key, error) {
 	}
 	if strings.Contains(account, ":") {
 		return nil, ErrColonInAccountName
+	}
+
+	// 10. Reject control characters in issuer and account name (prevent CRLF injection)
+	if containsControlChars(issuer) || containsControlChars(account) {
+		return nil, ErrInvalidURIChars
 	}
 
 	return k, nil
@@ -224,11 +259,17 @@ func (k *Key) Image(width int, height int) (image.Image, error) {
 
 // Type returns "hotp" or "totp".
 func (k *Key) Type() string {
+	if k.url == nil {
+		return ""
+	}
 	return k.url.Host
 }
 
 // Issuer returns the name of the issuing organization.
 func (k *Key) Issuer() string {
+	if k.url == nil {
+		return ""
+	}
 	q := k.url.Query()
 
 	issuer := q.Get("issuer")
@@ -249,6 +290,9 @@ func (k *Key) Issuer() string {
 
 // AccountName returns the name of the user's account.
 func (k *Key) AccountName() string {
+	if k.url == nil {
+		return ""
+	}
 	p := strings.TrimPrefix(k.url.Path, "/")
 	i := strings.Index(p, ":")
 
@@ -261,6 +305,9 @@ func (k *Key) AccountName() string {
 
 // Secret returns the opaque secret for this Key.
 func (k *Key) Secret() string {
+	if k.url == nil {
+		return ""
+	}
 	q := k.url.Query()
 
 	return q.Get("secret")
@@ -268,6 +315,9 @@ func (k *Key) Secret() string {
 
 // Period returns the rotation time in seconds.
 func (k *Key) Period() uint64 {
+	if k.url == nil {
+		return 30
+	}
 	q := k.url.Query()
 
 	if u, err := strconv.ParseUint(q.Get("period"), 10, 64); err == nil {
@@ -280,6 +330,9 @@ func (k *Key) Period() uint64 {
 
 // Digits returns the number of OTP digits.
 func (k *Key) Digits() Digits {
+	if k.url == nil {
+		return DigitsSix
+	}
 	q := k.url.Query()
 
 	if u, err := strconv.ParseUint(q.Get("digits"), 10, 64); err == nil {
@@ -292,6 +345,9 @@ func (k *Key) Digits() Digits {
 
 // Algorithm returns the algorithm used or the default (SHA1).
 func (k *Key) Algorithm() Algorithm {
+	if k.url == nil {
+		return AlgorithmSHA1
+	}
 	q := k.url.Query()
 
 	a := strings.ToLower(normalizeAlgorithmName(q.Get("algorithm")))
@@ -321,6 +377,9 @@ func (k *Key) Algorithm() Algorithm {
 
 // Encoder returns the encoder used or the default ("")
 func (k *Key) Encoder() Encoder {
+	if k.url == nil {
+		return EncoderDefault
+	}
 	q := k.url.Query()
 
 	a := strings.ToLower(q.Get("encoder"))
@@ -334,6 +393,9 @@ func (k *Key) Encoder() Encoder {
 
 // Counter returns the initial HOTP counter value, or 0 if not set or not an HOTP key.
 func (k *Key) Counter() uint64 {
+	if k.url == nil {
+		return 0
+	}
 	q := k.url.Query()
 	if u, err := strconv.ParseUint(q.Get("counter"), 10, 64); err == nil {
 		return u
@@ -343,6 +405,9 @@ func (k *Key) Counter() uint64 {
 
 // URL returns the OTP URL as a string
 func (k *Key) URL() string {
+	if k.url == nil {
+		return ""
+	}
 	return k.url.String()
 }
 
@@ -350,8 +415,22 @@ func (k *Key) URL() string {
 // Only FreeOTP and FreeOTP+ support this parameter; other authenticator
 // apps ignore it.
 func (k *Key) ImageURL() string {
+	if k.url == nil {
+		return ""
+	}
 	q := k.url.Query()
 	return q.Get("image")
+}
+
+// GetExtraParam returns the value of a custom query parameter from the OTP URI.
+// Returns empty string if the parameter does not exist.
+// This is useful for reading custom parameters that were set via ExtraParams
+// during key generation (e.g., "lock", "source", etc.).
+func (k *Key) GetExtraParam(key string) string {
+	if k.url == nil {
+		return ""
+	}
+	return k.url.Query().Get(key)
 }
 
 // Algorithm represents the hashing function to use in the HMAC
@@ -496,15 +575,14 @@ func (a Algorithm) Hash() hash.Hash {
 	}
 }
 
-// MustHash returns the hash.Hash for the algorithm, panicking if the algorithm
-// is unknown or invalid. Use this in performance-critical paths where the
-// algorithm has already been validated. For safe usage, prefer Hash() with
-// a prior IsValid() check.
-func (a Algorithm) MustHash() hash.Hash {
+// HashChecked returns the hash.Hash for the algorithm, returning an error if
+// the algorithm is unknown or invalid. For safe usage, prefer this over Hash()
+// which silently falls back to SHA1 for unknown algorithms.
+func (a Algorithm) HashChecked() (hash.Hash, error) {
 	if !a.IsValid() {
-		panic(fmt.Sprintf("otp: unknown algorithm %d", int(a)))
+		return nil, ErrInvalidAlgorithm
 	}
-	return a.Hash()
+	return a.Hash(), nil
 }
 
 // Digits represents the number of digits present in the

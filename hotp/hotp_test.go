@@ -774,3 +774,179 @@ func TestValidateCustomWindowMoreCases(t *testing.T) {
 	require.True(t, found)
 	require.Equal(t, 1, delta)
 }
+
+// ===== Generate error paths =====
+
+func TestGenerateInvalidImageURL(t *testing.T) {
+	_, err := Generate(GenerateOpts{
+		Issuer:      "Example",
+		AccountName: "alice@example.com",
+		ImageURL:    "http://not-https.com/img.png",
+	})
+	require.Error(t, err)
+}
+
+func TestGenerateEmptyImageURL(t *testing.T) {
+	key, err := Generate(GenerateOpts{
+		Issuer:      "Example",
+		AccountName: "alice@example.com",
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, key.Secret())
+}
+
+func TestGenerateCustomSecret(t *testing.T) {
+	sec := make([]byte, 20)
+	for i := range sec {
+		sec[i] = byte(i)
+	}
+	key, err := Generate(GenerateOpts{
+		Issuer:      "Example",
+		AccountName: "alice@example.com",
+		Secret:      sec,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, key.Secret())
+}
+
+func TestGenerateDefaultCounter(t *testing.T) {
+	key, err := Generate(GenerateOpts{
+		Issuer:      "Example",
+		AccountName: "alice@example.com",
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint64(0), key.Counter())
+}
+
+func TestGenerateNonDefaultCounter(t *testing.T) {
+	key, err := Generate(GenerateOpts{
+		Issuer:      "Example",
+		AccountName: "alice@example.com",
+		Counter:     100,
+	})
+	require.NoError(t, err)
+	require.Equal(t, uint64(100), key.Counter())
+}
+
+func TestGenerateValidImageURL(t *testing.T) {
+	key, err := Generate(GenerateOpts{
+		Issuer:      "Example",
+		AccountName: "alice@example.com",
+		ImageURL:    "https://example.com/logo.png",
+	})
+	require.NoError(t, err)
+	require.Equal(t, "https://example.com/logo.png", key.ImageURL())
+}
+
+// ===== ValidateCustomWindow: more AfterCounter edge cases =====
+
+func TestValidateCustomWindowAfterCounterBlocksPast(t *testing.T) {
+	sec := "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	code50, _ := GenerateCode(sec, 50)
+
+	// counter=52, window=5, AfterCounter=49 => code at counter=50 should be found (50 > 49)
+	delta, found, err := ValidateCustomWindow(code50, 52, sec, ValidateOptsWithWindow{
+		Digits:       otp.DigitsSix,
+		Window:       5,
+		AfterCounter: 49,
+	})
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, -2, delta)
+
+	// AfterCounter=50 => counter=50 is blocked (50 <= 50)
+	delta, found, err = ValidateCustomWindow(code50, 52, sec, ValidateOptsWithWindow{
+		Digits:       otp.DigitsSix,
+		Window:       5,
+		AfterCounter: 50,
+	})
+	require.NoError(t, err)
+	require.False(t, found)
+}
+
+func TestValidateCustomWindowWindowTooLarge(t *testing.T) {
+	sec := "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	_, _, err := ValidateCustomWindow("000000", 0, sec, ValidateOptsWithWindow{
+		Digits: otp.DigitsSix,
+		Window: 11,
+	})
+	require.Error(t, err)
+}
+
+// ===== More ValidateCustomWindow coverage =====
+
+func TestValidateCustomWindowInvalidLength(t *testing.T) {
+	sec := "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	_, _, err := ValidateCustomWindow("12345", 0, sec, ValidateOptsWithWindow{
+		Digits: otp.DigitsSix,
+		Window: 1,
+	})
+	require.Error(t, err)
+	require.Equal(t, otp.ErrValidateInputInvalidLength, err)
+}
+
+func TestValidateCustomWindowErrorInCheck(t *testing.T) {
+	// Short secret triggers error in GenerateCodeCustom
+	_, _, err := ValidateCustomWindow("000000", 0, "SHORT", ValidateOptsWithWindow{
+		Digits: otp.DigitsSix,
+		Window: 1,
+	})
+	require.Error(t, err)
+}
+
+func TestValidateCustomWindowExactWithAfterCounter(t *testing.T) {
+	sec := "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	code0, _ := GenerateCode(sec, 0)
+
+	// Exact counter=0, AfterCounter=0 (disabled) => accepted
+	delta, found, err := ValidateCustomWindow(code0, 0, sec, ValidateOptsWithWindow{
+		Digits:       otp.DigitsSix,
+		Window:       0,
+		AfterCounter: 0, // disabled
+	})
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, 0, delta)
+}
+
+func TestValidateCustomWindowFutureMatch(t *testing.T) {
+	sec := "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	code5, _ := GenerateCode(sec, 5)
+
+	// counter=3, window=3: code5 is 2 in the future
+	delta, found, err := ValidateCustomWindow(code5, 3, sec, ValidateOptsWithWindow{
+		Digits: otp.DigitsSix,
+		Window: 3,
+	})
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, 2, delta)
+}
+
+func TestValidateCustomWindowFutureBlockedByAfterCounter(t *testing.T) {
+	sec := "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	code5, _ := GenerateCode(sec, 5)
+
+	// counter=3, window=3, AfterCounter=5 => counter+2=5 is NOT > 5, blocked
+	delta, found, _ := ValidateCustomWindow(code5, 3, sec, ValidateOptsWithWindow{
+		Digits:       otp.DigitsSix,
+		Window:       3,
+		AfterCounter: 5,
+	})
+	require.False(t, found)
+	_ = delta
+}
+
+func TestValidateCustomWindowPastBlockedByAfterCounter(t *testing.T) {
+	sec := "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	code1, _ := GenerateCode(sec, 1)
+
+	// counter=3, window=3, AfterCounter=1 => counter-2=1 is NOT > 1, blocked
+	delta, found, _ := ValidateCustomWindow(code1, 3, sec, ValidateOptsWithWindow{
+		Digits:       otp.DigitsSix,
+		Window:       3,
+		AfterCounter: 1,
+	})
+	require.False(t, found)
+	_ = delta
+}
