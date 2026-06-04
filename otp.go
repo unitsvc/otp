@@ -27,18 +27,20 @@ import (
 	"hash"
 	"image"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/boombuler/barcode"
 	"github.com/boombuler/barcode/qr"
+	"golang.org/x/crypto/sha3"
 )
 
 // Error when attempting to convert the secret from base32 to raw bytes.
-var ErrValidateSecretInvalidBase32 = errors.New("Decoding of secret as base32 failed.")
+var ErrValidateSecretInvalidBase32 = errors.New("decoding of secret as base32 failed")
 
 // The user provided passcode length was not expected.
-var ErrValidateInputInvalidLength = errors.New("Input length unexpected")
+var ErrValidateInputInvalidLength = errors.New("input length unexpected")
 
 // When generating a Key, the Issuer must be set.
 var ErrGenerateMissingIssuer = errors.New("Issuer must be set")
@@ -46,7 +48,64 @@ var ErrGenerateMissingIssuer = errors.New("Issuer must be set")
 // When generating a Key, the Account Name must be set.
 var ErrGenerateMissingAccountName = errors.New("AccountName must be set")
 
-// Key represents an TOTP or HTOP key.
+// URI format validation errors.
+var ErrInvalidURIFormat = errors.New("invalid URI format")
+var ErrInvalidURIScheme = errors.New("invalid URI scheme, must be otpauth://")
+var ErrInvalidURIType = errors.New("invalid OTP type, must be 'hotp' or 'totp'")
+var ErrMissingSecret = errors.New("missing required 'secret' parameter")
+var ErrInvalidSecretFormat = errors.New("invalid 'secret' format, must be valid Base32")
+var ErrInvalidAlgorithm = errors.New("invalid 'algorithm' parameter")
+var ErrInvalidDigits = errors.New("invalid 'digits' parameter")
+var ErrInvalidPeriod = errors.New("invalid 'period' parameter")
+var ErrInvalidCounter = errors.New("invalid 'counter' parameter")
+var ErrColonInIssuer = errors.New("invalid colon in issuer name")
+var ErrColonInAccountName = errors.New("invalid colon in account name")
+
+// Security validation errors.
+var ErrDigestTooSmall = errors.New("HMAC digest size too small, must be at least 19 bytes for dynamic truncation safety")
+var ErrAlgorithmDigestInsufficient = errors.New("algorithm produces insufficient digest size for OTP generation")
+var ErrReplayAttack = errors.New("replay attack detected: time step already used")
+var ErrURITooLong = errors.New("URI exceeds maximum allowed length")
+var ErrSecretTooShort = errors.New("secret too short, must be at least 16 bytes")
+var ErrSecretTooLong = errors.New("secret too long, must be at most 64 bytes")
+var ErrWindowTooLarge = errors.New("window exceeds maximum allowed value")
+var ErrDigitsOutOfRange = errors.New("digits out of range: default encoder requires 6-10, Steam encoder allows 5-10")
+var ErrPeriodOutOfRange = errors.New("period out of range, must be between 1 and 300 seconds")
+var ErrInvalidEncoder = errors.New("invalid encoder: must be EncoderDefault or EncoderSteam")
+var ErrInvalidImageURL = errors.New("image URL must be a valid HTTPS URL")
+var ErrValidateInputInvalidChars = errors.New("passcode contains invalid characters")
+
+// Validation regex patterns
+var (
+	// Base32 alphabet: A-Z, 2-7 (RFC 4648)
+	secretRegex = regexp.MustCompile(`^[2-7A-Z]+=*$`)
+	// Supported algorithms (canonical names after normalization)
+	algorithmRegex = regexp.MustCompile(`^SHA(?:1|224|256|384|512|3-224|3-256|3-384|3-512)$|^MD5$`)
+	// Positive integer
+	posIntRegex = regexp.MustCompile(`^\+?[1-9]\d*$`)
+	// Integer (including zero and negative)
+	intRegex = regexp.MustCompile(`^[+-]?\d+$`)
+)
+
+// normalizeAlgorithmName normalizes algorithm name variants to canonical form.
+// Accepts aliases like "SHA-256", "SHA2-256", "SSL3-SHA1" and produces "SHA256", "SHA1".
+func normalizeAlgorithmName(name string) string {
+	s := strings.ToUpper(strings.TrimSpace(name))
+	// SSL3-SHA1 -> SHA1 (remainder already has SHA prefix)
+	if strings.HasPrefix(s, "SSL3-") {
+		return s[5:]
+	}
+	// Strip known prefixes that authenticator apps may emit
+	// SHA-256 -> SHA256, SHA2-256 -> SHA256
+	for _, prefix := range []string{"SHA2-", "SHA2?", "SHA-"} {
+		if strings.HasPrefix(s, prefix) {
+			return "SHA" + s[len(prefix):]
+		}
+	}
+	return s
+}
+
+// Key represents a TOTP or HOTP key.
 type Key struct {
 	orig string
 	url  *url.URL
@@ -57,26 +116,96 @@ type Key struct {
 // The URL format is documented here:
 //
 //	https://github.com/google/google-authenticator/wiki/Key-Uri-Format
+//
+// This function performs strict validation per IETF draft-andesco-otpauth-uri:
+// - Validates URI scheme is "otpauth://"
+// - Validates OTP type is "hotp" or "totp"
+// - Validates required "secret" parameter exists and is valid Base32
+// - Validates optional parameters have correct formats
+// - Rejects URIs with colons in parsed issuer or account name
 func NewKeyFromURL(orig string) (*Key, error) {
 	s := strings.TrimSpace(orig)
+
+	// 1. Validate URI scheme
+	if !strings.HasPrefix(s, "otpauth://") {
+		return nil, ErrInvalidURIScheme
+	}
 
 	u, err := url.Parse(s)
 	if err != nil {
 		return nil, err
 	}
 
-	return &Key{
+	// 2. Validate OTP type
+	if u.Host != "hotp" && u.Host != "totp" {
+		return nil, ErrInvalidURIType
+	}
+
+	// 3. Validate required secret parameter
+	q := u.Query()
+	secret := q.Get("secret")
+	if secret == "" {
+		return nil, ErrMissingSecret
+	}
+
+	// 4. Validate secret format (Base32)
+	secret = strings.ToUpper(strings.ReplaceAll(secret, " ", ""))
+	if !secretRegex.MatchString(secret) {
+		return nil, ErrInvalidSecretFormat
+	}
+
+	// 5. Validate optional algorithm parameter (normalize aliases like SHA-256 -> SHA256)
+	if alg := q.Get("algorithm"); alg != "" {
+		if !algorithmRegex.MatchString(normalizeAlgorithmName(alg)) {
+			return nil, ErrInvalidAlgorithm
+		}
+	}
+
+	// 6. Validate optional digits parameter
+	if digits := q.Get("digits"); digits != "" {
+		if !posIntRegex.MatchString(digits) {
+			return nil, ErrInvalidDigits
+		}
+	}
+
+	// 7. Validate optional period parameter (TOTP)
+	if u.Host == "totp" && q.Get("period") != "" {
+		if !posIntRegex.MatchString(q.Get("period")) {
+			return nil, ErrInvalidPeriod
+		}
+	}
+
+	// 8. Validate optional counter parameter (HOTP)
+	if u.Host == "hotp" && q.Get("counter") != "" {
+		if !intRegex.MatchString(q.Get("counter")) {
+			return nil, ErrInvalidCounter
+		}
+	}
+
+	k := &Key{
 		orig: s,
 		url:  u,
-	}, nil
+	}
+
+	// 9. Validate no colons in issuer or account name (IETF draft requirement)
+	issuer := k.Issuer()
+	account := k.AccountName()
+	if strings.Contains(issuer, ":") {
+		return nil, ErrColonInIssuer
+	}
+	if strings.Contains(account, ":") {
+		return nil, ErrColonInAccountName
+	}
+
+	return k, nil
 }
 
 func (k *Key) String() string {
 	return k.orig
 }
 
-// Image returns an QR-Code image of the specified width and height,
-// suitable for use by many clients like Google-Authenricator
+// Image returns a QR-Code image of the specified width and height,
+// suitable for use by many clients like Google-Authenticator
 // to enroll a user's TOTP/HOTP key.
 func (k *Key) Image(width int, height int) (image.Image, error) {
 	b, err := qr.Encode(k.orig, qr.M, qr.Auto)
@@ -137,7 +266,7 @@ func (k *Key) Secret() string {
 	return q.Get("secret")
 }
 
-// Period returns a tiny int representing the rotation time in seconds.
+// Period returns the rotation time in seconds.
 func (k *Key) Period() uint64 {
 	q := k.url.Query()
 
@@ -149,7 +278,7 @@ func (k *Key) Period() uint64 {
 	return 30
 }
 
-// Digits returns a tiny int representing the number of OTP digits.
+// Digits returns the number of OTP digits.
 func (k *Key) Digits() Digits {
 	q := k.url.Query()
 
@@ -165,14 +294,26 @@ func (k *Key) Digits() Digits {
 func (k *Key) Algorithm() Algorithm {
 	q := k.url.Query()
 
-	a := strings.ToLower(q.Get("algorithm"))
+	a := strings.ToLower(normalizeAlgorithmName(q.Get("algorithm")))
 	switch a {
-	case "md5":
-		return AlgorithmMD5
 	case "sha256":
 		return AlgorithmSHA256
 	case "sha512":
 		return AlgorithmSHA512
+	case "md5":
+		return AlgorithmMD5
+	case "sha224":
+		return AlgorithmSHA224
+	case "sha384":
+		return AlgorithmSHA384
+	case "sha3-224":
+		return AlgorithmSHA3_224
+	case "sha3-256":
+		return AlgorithmSHA3_256
+	case "sha3-384":
+		return AlgorithmSHA3_384
+	case "sha3-512":
+		return AlgorithmSHA3_512
 	default:
 		return AlgorithmSHA1
 	}
@@ -191,9 +332,26 @@ func (k *Key) Encoder() Encoder {
 	}
 }
 
+// Counter returns the initial HOTP counter value, or 0 if not set or not an HOTP key.
+func (k *Key) Counter() uint64 {
+	q := k.url.Query()
+	if u, err := strconv.ParseUint(q.Get("counter"), 10, 64); err == nil {
+		return u
+	}
+	return 0
+}
+
 // URL returns the OTP URL as a string
 func (k *Key) URL() string {
 	return k.url.String()
+}
+
+// ImageURL returns the image parameter from the OTP URL, if set.
+// Only FreeOTP and FreeOTP+ support this parameter; other authenticator
+// apps ignore it.
+func (k *Key) ImageURL() string {
+	q := k.url.Query()
+	return q.Get("image")
 }
 
 // Algorithm represents the hashing function to use in the HMAC
@@ -203,12 +361,44 @@ type Algorithm int
 const (
 	// AlgorithmSHA1 should be used for compatibility with Google Authenticator.
 	//
-	// See https://github.com/unitsvc/otp/issues/55 for additional details.
+	// HMAC-SHA1 remains cryptographically secure for OTP despite SHA1 collision attacks.
+	// See RFC 4226 Section 9: https://tools.ietf.org/html/rfc4226#section-9
+	//
+	// For new deployments where all clients support SHA256, consider AlgorithmSHA256.
 	AlgorithmSHA1 Algorithm = iota
 	AlgorithmSHA256
 	AlgorithmSHA512
 	AlgorithmMD5
+	// Extended algorithms (appended to preserve numeric values of original constants)
+	AlgorithmSHA224
+	AlgorithmSHA384
+	// SHA3 variants (Keccak) - extended algorithm support
+	AlgorithmSHA3_224
+	AlgorithmSHA3_256
+	AlgorithmSHA3_384
+	AlgorithmSHA3_512
 )
+
+// Semantic aliases for clarity and documentation.
+
+// AlgorithmCompat is the compatibility default (SHA1).
+// Use for maximum compatibility with all authenticator apps including
+// Google Authenticator, Microsoft Authenticator, Authy, and others.
+//
+// This is the zero-value default for ValidateOpts.Algorithm.
+const AlgorithmCompat = AlgorithmSHA1
+
+// AlgorithmSecure is the security-recommended algorithm (SHA256).
+// Use for new deployments where all clients support SHA256:
+// - Google Authenticator 2.0+
+// - Microsoft Authenticator
+// - Authy
+// - KeePassXC
+// - WinAuth
+// - Bitwarden
+//
+// Note: Some older authenticator apps may not support SHA256.
+const AlgorithmSecure = AlgorithmSHA256
 
 func (a Algorithm) String() string {
 	switch a {
@@ -220,8 +410,62 @@ func (a Algorithm) String() string {
 		return "SHA512"
 	case AlgorithmMD5:
 		return "MD5"
+	case AlgorithmSHA224:
+		return "SHA224"
+	case AlgorithmSHA384:
+		return "SHA384"
+	case AlgorithmSHA3_224:
+		return "SHA3-224"
+	case AlgorithmSHA3_256:
+		return "SHA3-256"
+	case AlgorithmSHA3_384:
+		return "SHA3-384"
+	case AlgorithmSHA3_512:
+		return "SHA3-512"
+	default:
+		return fmt.Sprintf("UNKNOWN(%d)", int(a))
 	}
-	panic("unreached")
+}
+
+// ParseAlgorithm parses an algorithm name string (case-insensitive) into an Algorithm.
+// Accepts common aliases: "SHA-256", "SHA256", "SHA2-256", "SHA-1", "SHA1", "SSL3-SHA1".
+// Returns an error if the name is not recognized.
+func ParseAlgorithm(name string) (Algorithm, error) {
+	switch strings.ToLower(normalizeAlgorithmName(name)) {
+	case "sha1":
+		return AlgorithmSHA1, nil
+	case "sha256":
+		return AlgorithmSHA256, nil
+	case "sha512":
+		return AlgorithmSHA512, nil
+	case "md5":
+		return AlgorithmMD5, nil
+	case "sha224":
+		return AlgorithmSHA224, nil
+	case "sha384":
+		return AlgorithmSHA384, nil
+	case "sha3-224":
+		return AlgorithmSHA3_224, nil
+	case "sha3-256":
+		return AlgorithmSHA3_256, nil
+	case "sha3-384":
+		return AlgorithmSHA3_384, nil
+	case "sha3-512":
+		return AlgorithmSHA3_512, nil
+	default:
+		return AlgorithmSHA1, ErrInvalidAlgorithm
+	}
+}
+
+// IsValid reports whether the Algorithm is a known, supported value.
+func (a Algorithm) IsValid() bool {
+	switch a {
+	case AlgorithmSHA1, AlgorithmSHA256, AlgorithmSHA512,
+		AlgorithmMD5, AlgorithmSHA224, AlgorithmSHA384,
+		AlgorithmSHA3_224, AlgorithmSHA3_256, AlgorithmSHA3_384, AlgorithmSHA3_512:
+		return true
+	}
+	return false
 }
 
 func (a Algorithm) Hash() hash.Hash {
@@ -234,8 +478,33 @@ func (a Algorithm) Hash() hash.Hash {
 		return sha512.New()
 	case AlgorithmMD5:
 		return md5.New()
+	case AlgorithmSHA224:
+		return sha256.New224()
+	case AlgorithmSHA384:
+		return sha512.New384()
+	case AlgorithmSHA3_224:
+		return sha3.New224()
+	case AlgorithmSHA3_256:
+		return sha3.New256()
+	case AlgorithmSHA3_384:
+		return sha3.New384()
+	case AlgorithmSHA3_512:
+		return sha3.New512()
+	default:
+		// Unknown algorithm: fallback to SHA1 but callers should check IsValid() first.
+		return sha1.New()
 	}
-	panic("unreached")
+}
+
+// MustHash returns the hash.Hash for the algorithm, panicking if the algorithm
+// is unknown or invalid. Use this in performance-critical paths where the
+// algorithm has already been validated. For safe usage, prefer Hash() with
+// a prior IsValid() check.
+func (a Algorithm) MustHash() hash.Hash {
+	if !a.IsValid() {
+		panic(fmt.Sprintf("otp: unknown algorithm %d", int(a)))
+	}
+	return a.Hash()
 }
 
 // Digits represents the number of digits present in the
@@ -262,9 +531,14 @@ func (d Digits) String() string {
 	return fmt.Sprintf("%d", d)
 }
 
+// Encoder represents the output encoding format for OTP codes.
 type Encoder string
 
 const (
 	EncoderDefault Encoder = ""
-	EncoderSteam   Encoder = "steam"
+	// EncoderSteam produces 5-character alphanumeric codes using the Steam Guard
+	// alphabet (23456789BCDFGHJKMNPQRTVWXY). Only compatible with KeePassXC, WinAuth,
+	// Bitwarden, and the Steam Mobile App. Google Authenticator and Microsoft
+	// Authenticator do not support this encoder.
+	EncoderSteam Encoder = "steam"
 )

@@ -1,16 +1,25 @@
+// Package main demonstrates a basic TOTP setup flow.
+//
+// This is the original example from the library. For comprehensive examples
+// covering all features, see the sub-directories:
+//
+//	go run ./example/secret/main.go   — Secret management
+//	go run ./example/hotp/main.go     — HOTP (counter-based) OTP
+//	go run ./example/totp/main.go     — TOTP (time-based) OTP
+//	go run ./example/otp/main.go      — Core package (Key, URI, algorithms)
+//
+// Run this example: go run ./example/main.go
 package main
 
 import (
-	"github.com/unitsvc/otp"
-	"github.com/unitsvc/otp/totp"
-
 	"bufio"
 	"bytes"
-	"encoding/base32"
 	"fmt"
 	"image/png"
 	"os"
-	"time"
+
+	"github.com/unitsvc/otp"
+	"github.com/unitsvc/otp/totp"
 )
 
 func display(key *otp.Key, data []byte) {
@@ -31,22 +40,6 @@ func promptForPasscode() string {
 	return text
 }
 
-// Demo function, not used in main
-// Generates Passcode using a UTF-8 (not base32) secret and custom parameters
-func GeneratePassCode(utf8string string) string {
-	secret := base32.StdEncoding.EncodeToString([]byte(utf8string))
-	passcode, err := totp.GenerateCodeCustom(secret, time.Now(), totp.ValidateOpts{
-		Period:    30,
-		Skew:      1,
-		Digits:    otp.DigitsSix,
-		Algorithm: otp.AlgorithmSHA512,
-	})
-	if err != nil {
-		panic(err)
-	}
-	return passcode
-}
-
 func main() {
 	key, err := totp.Generate(totp.GenerateOpts{
 		Issuer:      "Example.com",
@@ -55,6 +48,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+
 	// Convert TOTP key into a PNG
 	var buf bytes.Buffer
 	img, err := key.Image(200, 200)
@@ -63,14 +57,13 @@ func main() {
 	}
 	png.Encode(&buf, img)
 
-	// display the QR code to the user.
+	// Display the QR code to the user
 	display(key, buf.Bytes())
 
-	// Now Validate that the user's successfully added the passcode.
+	// Now Validate that the user's successfully added the passcode
 	fmt.Println("Validating TOTP...")
 	passcode := promptForPasscode()
-	valid := totp.Validate(passcode, key.Secret())
-	if valid {
+	if totp.Validate(passcode, key.Secret()) {
 		println("Valid passcode!")
 		os.Exit(0)
 	} else {
