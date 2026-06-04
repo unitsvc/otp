@@ -477,6 +477,21 @@ func Generate(opts GenerateOpts) (*otp.Key, error) {
 		opts.Rand = rand.Reader
 	}
 
+	// Validate parameters match GenerateCodeCustom guardrails
+	if opts.SecretSize < 16 {
+		return nil, otp.ErrSecretTooShort
+	}
+	if opts.SecretSize > 64 {
+		return nil, otp.ErrSecretTooLong
+	}
+	digitsVal := int(opts.Digits)
+	if digitsVal < 6 || digitsVal > 10 {
+		return nil, otp.ErrDigitsOutOfRange
+	}
+	if !opts.Algorithm.IsValid() {
+		return nil, otp.ErrInvalidAlgorithm
+	}
+
 	// Validate ImageURL if provided
 	if opts.ImageURL != "" {
 		imgURL, err := url.Parse(opts.ImageURL)

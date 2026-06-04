@@ -625,7 +625,7 @@ func TestTOTPGenerateOptionsInjection(t *testing.T) {
 			issuer:      "Example",
 			accountName: "alice@example.com",
 			period:      301,
-			wantErr:     nil, // Generate() does not validate period range
+			wantErr:     otp.ErrPeriodOutOfRange, // Generate() now validates period range
 		},
 		{
 			name:        "invalid secret size",

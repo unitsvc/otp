@@ -244,12 +244,17 @@ func RemainingWithT0(period uint, t0 int64, t time.Time) uint64 {
 		elapsedMs = t.UnixMilli() - t0*1000
 	} else if t0 <= 0 {
 		// T0 is zero or negative: t.UnixMilli() - t0*1000 is always positive
-		// but t0*1000 may overflow for MinInt64. Use addition instead.
-		elapsedMs = t.UnixMilli() + (-t0)*1000
+		// but (-t0)*1000 may overflow for extreme values (e.g. MinInt64).
+		// Check t0 directly before negating to avoid overflow in -t0 itself.
+		if t0 <= -math.MaxInt64/1000 {
+			// |t0| so large that computation would overflow, clamp
+			elapsedMs = math.MaxInt64
+		} else {
+			absT0 := -t0
+			elapsedMs = t.UnixMilli() + absT0*1000
+		}
 	} else {
 		// T0 is in the future: elapsed should be 0 or negative
-		// t0 > t.Unix(), so t0*1000 may overflow. Use safe subtraction.
-		// If t0 > t.Unix(), then elapsedMs < 0.
 		elapsedMs = 0
 	}
 	if elapsedMs < 0 {
@@ -541,6 +546,28 @@ func Generate(opts GenerateOpts) (*otp.Key, error) {
 
 	if opts.Rand == nil {
 		opts.Rand = rand.Reader
+	}
+
+	// Validate parameters match GenerateCodeCustom guardrails
+	if opts.SecretSize < 16 {
+		return nil, otp.ErrSecretTooShort
+	}
+	if opts.SecretSize > 64 {
+		return nil, otp.ErrSecretTooLong
+	}
+	digitsVal := int(opts.Digits)
+	if opts.Encoder == otp.EncoderSteam {
+		if digitsVal < 5 || digitsVal > 10 {
+			return nil, otp.ErrDigitsOutOfRange
+		}
+	} else if digitsVal < 6 || digitsVal > 10 {
+		return nil, otp.ErrDigitsOutOfRange
+	}
+	if !opts.Algorithm.IsValid() {
+		return nil, otp.ErrInvalidAlgorithm
+	}
+	if opts.Period < 1 || opts.Period > 300 {
+		return nil, otp.ErrPeriodOutOfRange
 	}
 
 	// Validate ImageURL if provided
